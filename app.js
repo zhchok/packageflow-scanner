@@ -70,14 +70,14 @@ function stopCamera() {
 }
 
 function presentCandidate(value) {
-  if (completed || pendingTracking) return;
+  if (completed || pendingTracking) return false;
   const tracking = normalizeTracking(value);
   if (!isTracking(tracking)) {
     setStatus(
       "Код распознан, но не похож на трек-номер. Продолжаем сканирование…",
       "error",
     );
-    return;
+    return false;
   }
 
   pendingTracking = tracking;
@@ -91,6 +91,7 @@ function presentCandidate(value) {
   setStatus("Проверьте распознанный номер.", "success");
   navigator.vibrate?.(100);
   telegram?.HapticFeedback?.notificationOccurred("success");
+  return true;
 }
 
 function confirmCandidate() {
@@ -151,8 +152,10 @@ async function startNativeScanner(formats) {
       lastDetectionAt = now;
       try {
         const results = await detector.detect(video);
-        if (results.length) {
-          presentCandidate(results[0].rawValue);
+        if (
+          results.length &&
+          presentCandidate(results[0].rawValue)
+        ) {
           return;
         }
       } catch (error) {

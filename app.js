@@ -2,13 +2,23 @@
 
 const telegram = window.Telegram?.WebApp;
 const video = document.querySelector("#preview");
+const cameraFrame = document.querySelector(".camera-frame");
+const hint = document.querySelector(".hint");
 const statusNode = document.querySelector("#status");
+const actions = document.querySelector("#actions");
 const startButton = document.querySelector("#start");
 const torchButton = document.querySelector("#torch");
 const manualButton = document.querySelector("#manual");
 const closeButton = document.querySelector("#close");
 const manualForm = document.querySelector("#manual-form");
 const manualValue = document.querySelector("#manual-value");
+const confirmation = document.querySelector("#confirmation");
+const candidateNode = document.querySelector("#candidate");
+const confirmButton = document.querySelector("#confirm");
+const rescanButton = document.querySelector("#rescan");
+const cancelConfirmationButton = document.querySelector(
+  "#cancel-confirmation",
+);
 
 const supportedFormats = [
   "code_128",
@@ -29,6 +39,7 @@ let stream;
 let controls;
 let scanning = false;
 let completed = false;
+let pendingTracking;
 let torchEnabled = false;
 let lastDetectionAt = 0;
 
@@ -58,8 +69,8 @@ function stopCamera() {
   video.srcObject = null;
 }
 
-function deliver(value) {
-  if (completed) return;
+function presentCandidate(value) {
+  if (completed || pendingTracking) return;
   const tracking = normalizeTracking(value);
   if (!isTracking(tracking)) {
     setStatus(
@@ -69,22 +80,49 @@ function deliver(value) {
     return;
   }
 
-  completed = true;
+  pendingTracking = tracking;
   stopCamera();
-  setStatus(`Распознано: ${tracking}`, "success");
+  cameraFrame.hidden = true;
+  hint.hidden = true;
+  actions.hidden = true;
+  manualForm.hidden = true;
+  candidateNode.textContent = tracking;
+  confirmation.hidden = false;
+  setStatus("Проверьте распознанный номер.", "success");
   navigator.vibrate?.(100);
   telegram?.HapticFeedback?.notificationOccurred("success");
+}
+
+function confirmCandidate() {
+  if (completed || !pendingTracking) return;
+  completed = true;
+  confirmButton.disabled = true;
+  rescanButton.disabled = true;
+  setStatus(`Передаём боту: ${pendingTracking}`, "success");
 
   if (telegram?.sendData) {
-    telegram.sendData(JSON.stringify({ type: "barcode", value: tracking }));
+    telegram.sendData(
+      JSON.stringify({ type: "barcode", value: pendingTracking }),
+    );
   } else {
-    manualValue.value = tracking;
-    manualForm.hidden = false;
     setStatus(
-      `Распознано локально: ${tracking}. В Telegram код будет передан боту автоматически.`,
+      `Подтверждено локально: ${pendingTracking}. В Telegram номер будет передан боту.`,
       "success",
     );
   }
+}
+
+function rescan() {
+  pendingTracking = undefined;
+  completed = false;
+  candidateNode.textContent = "";
+  confirmation.hidden = true;
+  cameraFrame.hidden = false;
+  hint.hidden = false;
+  actions.hidden = false;
+  confirmButton.disabled = false;
+  rescanButton.disabled = false;
+  startScanner();
 }
 
 async function startNativeScanner(formats) {
@@ -114,7 +152,7 @@ async function startNativeScanner(formats) {
       try {
         const results = await detector.detect(video);
         if (results.length) {
-          deliver(results[0].rawValue);
+          presentCandidate(results[0].rawValue);
           return;
         }
       } catch (error) {
@@ -158,7 +196,7 @@ async function startZxingScanner() {
     },
     video,
     (result) => {
-      if (result) deliver(result.getText());
+      if (result) presentCandidate(result.getText());
     },
   );
   setStatus("Камера включена. Наведите её на штрихкод.");
@@ -216,7 +254,13 @@ manualButton.addEventListener("click", () => {
 });
 manualForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  deliver(manualValue.value);
+  presentCandidate(manualValue.value);
+});
+confirmButton.addEventListener("click", confirmCandidate);
+rescanButton.addEventListener("click", rescan);
+cancelConfirmationButton.addEventListener("click", () => {
+  stopCamera();
+  telegram?.close();
 });
 closeButton.addEventListener("click", () => {
   stopCamera();

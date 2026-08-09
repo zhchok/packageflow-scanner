@@ -182,6 +182,41 @@ h1 {
   text-align: center;
 }
 
+.confirmation {
+  margin: 14px 0;
+  padding: 18px;
+  border: 1px solid var(--accent-strong);
+  border-radius: 18px;
+  background: var(--surface);
+  text-align: center;
+}
+
+.confirmation-label,
+.confirmation-hint {
+  margin: 0;
+  color: var(--muted);
+}
+
+.candidate {
+  display: block;
+  margin: 12px 0;
+  color: var(--accent);
+  font-size: clamp(22px, 7vw, 32px);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.confirmation-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.confirmation-actions .button-quiet {
+  grid-column: 1 / -1;
+}
+
 .actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -206,6 +241,11 @@ h1 {
 
 .button-quiet {
   color: var(--muted);
+}
+
+.button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .manual-form {

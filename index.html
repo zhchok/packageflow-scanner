@@ -41,7 +41,33 @@
 
       <p class="hint">Поместите один штрихкод внутрь рамки.</p>
 
-      <div class="actions">
+      <section
+        id="confirmation"
+        class="confirmation"
+        aria-labelledby="confirmation-title"
+        hidden
+      >
+        <p id="confirmation-title" class="confirmation-label">
+          Распознан трек-номер
+        </p>
+        <output id="candidate" class="candidate"></output>
+        <p class="confirmation-hint">
+          Проверьте номер перед передачей боту.
+        </p>
+        <div class="confirmation-actions">
+          <button id="confirm" class="button button-primary" type="button">
+            ✅ Подтвердить
+          </button>
+          <button id="rescan" class="button" type="button">
+            🔄 Сканировать ещё раз
+          </button>
+          <button id="cancel-confirmation" class="button button-quiet" type="button">
+            Отмена
+          </button>
+        </div>
+      </section>
+
+      <div id="actions" class="actions">
         <button id="start" class="button button-primary" type="button" hidden>
           Включить камеру
         </button>

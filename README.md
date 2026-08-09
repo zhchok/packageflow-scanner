@@ -1,8 +1,10 @@
 # PackageFlow Scanner
 
-Static Telegram Mini App for real-time 1D/2D barcode scanning.
+Static Telegram Mini App for button-triggered 1D/2D barcode and tracking-text scanning.
 
 - Runs barcode recognition locally on the user's device.
+- Scans once on tap or continuously while the scan button is held.
+- Falls back to local OCR when a barcode or QR code cannot be decoded.
 - Sends only the decoded tracking number to PackageFlow Bot.
 - Does not upload, store, or transmit camera frames.
 - Uses the native `BarcodeDetector` API when available and ZXing as a compatibility fallback.

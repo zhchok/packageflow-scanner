@@ -6,19 +6,20 @@
     <meta name="theme-color" content="#101827" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' https://telegram.org https://unpkg.com; style-src 'self'; media-src 'self' blob:; connect-src 'self' https://unpkg.com; img-src 'self' data: blob:"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://telegram.org https://unpkg.com https://cdn.jsdelivr.net; style-src 'self'; media-src 'self' blob:; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; img-src 'self' data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net"
     />
     <title>PackageFlow Scanner</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="styles.css?v=3" />
+    <link rel="stylesheet" href="styles.css?v=4" />
     <script src="https://telegram.org/js/telegram-web-app.js?61"></script>
-    <script src="app.js?v=3" defer></script>
+    <script src="ocr.js?v=4" defer></script>
+    <script src="app.js?v=4" defer></script>
   </head>
   <body>
     <main class="scanner-shell">
       <header>
         <p class="eyebrow">PACKAGEFLOW</p>
-        <h1>Сканирование штрихкода</h1>
+        <h1>Сканирование трек-номера</h1>
         <p id="status" class="status" aria-live="polite">
           Запрашиваем доступ к камере…
         </p>
@@ -39,7 +40,10 @@
         </div>
       </section>
 
-      <p class="hint">Поместите один штрихкод внутрь рамки.</p>
+      <p class="hint">
+        Поместите штрихкод, QR или напечатанный трек внутри рамки. Нажмите
+        кнопку один раз или удерживайте для непрерывного сканирования.
+      </p>
 
       <section
         id="confirmation"
@@ -68,6 +72,14 @@
       </section>
 
       <div id="actions" class="actions">
+        <button
+          id="scan-once"
+          class="button button-primary scan-trigger"
+          type="button"
+          disabled
+        >
+          🔍 Сканировать
+        </button>
         <button id="start" class="button button-primary" type="button" hidden>
           Включить камеру
         </button>

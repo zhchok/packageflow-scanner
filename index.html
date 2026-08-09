@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="theme-color" content="#101827" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://telegram.org https://unpkg.com; style-src 'self'; media-src 'self' blob:; connect-src 'self' https://unpkg.com; img-src 'self' data: blob:"
+    />
+    <title>PackageFlow Scanner</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js?61"></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main class="scanner-shell">
+      <header>
+        <p class="eyebrow">PACKAGEFLOW</p>
+        <h1>Сканирование штрихкода</h1>
+        <p id="status" class="status" aria-live="polite">
+          Запрашиваем доступ к камере…
+        </p>
+      </header>
+
+      <section class="camera-frame" aria-label="Область сканирования">
+        <video id="preview" playsinline muted></video>
+        <div class="shade shade-top"></div>
+        <div class="shade shade-bottom"></div>
+        <div class="shade shade-left"></div>
+        <div class="shade shade-right"></div>
+        <div class="scan-box" aria-hidden="true">
+          <span class="corner corner-tl"></span>
+          <span class="corner corner-tr"></span>
+          <span class="corner corner-bl"></span>
+          <span class="corner corner-br"></span>
+          <span class="scan-line"></span>
+        </div>
+      </section>
+
+      <p class="hint">Поместите один штрихкод внутрь рамки.</p>
+
+      <div class="actions">
+        <button id="start" class="button button-primary" type="button" hidden>
+          Включить камеру
+        </button>
+        <button id="torch" class="button" type="button" hidden>
+          🔦 Фонарик
+        </button>
+        <button id="manual" class="button" type="button">
+          Ввести трек вручную
+        </button>
+        <button id="close" class="button button-quiet" type="button">
+          Отмена
+        </button>
+      </div>
+
+      <form id="manual-form" class="manual-form" hidden>
+        <label for="manual-value">Трек-номер</label>
+        <div class="manual-row">
+          <input
+            id="manual-value"
+            name="tracking"
+            autocomplete="off"
+            autocapitalize="characters"
+            maxlength="100"
+            placeholder="Например, TBA123456789"
+          />
+          <button class="button button-primary" type="submit">Передать</button>
+        </div>
+      </form>
+    </main>
+  </body>
+</html>

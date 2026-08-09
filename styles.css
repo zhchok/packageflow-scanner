@@ -64,8 +64,9 @@ h1 {
   position: relative;
   overflow: hidden;
   width: 100%;
-  aspect-ratio: 3 / 4;
-  max-height: 62vh;
+  height: min(48vh, 500px);
+  height: min(48dvh, 500px);
+  min-height: 300px;
   border: 1px solid #273550;
   border-radius: 22px;
   background: #05080e;
@@ -183,8 +184,10 @@ h1 {
 }
 
 .hint {
-  margin: 12px 0;
+  margin: 10px 0 0;
   color: var(--muted);
+  font-size: 15px;
+  line-height: 1.35;
   text-align: center;
 }
 
@@ -227,9 +230,10 @@ h1 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+  margin-top: 12px;
 }
 
-.scan-trigger {
+.button.scan-trigger {
   grid-column: 1 / -1;
   min-height: 58px;
   font-size: 18px;
@@ -301,6 +305,33 @@ input {
   padding: 0 12px;
   font: inherit;
   text-transform: uppercase;
+}
+
+@media (max-width: 700px) {
+  body {
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+
+  .eyebrow {
+    font-size: 11px;
+  }
+
+  h1 {
+    font-size: 28px;
+    line-height: 1.1;
+  }
+
+  .status {
+    min-height: 36px;
+    margin: 8px 0 12px;
+    font-size: 15px;
+  }
+
+  .camera-frame {
+    height: min(46vh, 480px);
+    height: min(46dvh, 480px);
+    min-height: 280px;
+  }
 }
 
 [hidden] {

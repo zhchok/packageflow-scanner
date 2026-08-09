@@ -69,6 +69,20 @@ function isTracking(value) {
   return /^[A-Z0-9-]{3,100}$/.test(value);
 }
 
+function extractTrackingFromPayload(value) {
+  const rawValue = String(value || "").trim();
+  const directValue = normalizeTracking(rawValue);
+  if (isTracking(directValue)) return directValue;
+
+  const readablePayload = rawValue.replace(
+    /[\u0000-\u001f\u007f-\u009f]+/g,
+    "\n",
+  );
+  return window.PackageFlowOcr.extractTracking(readablePayload, {
+    knownFormatsOnly: true,
+  });
+}
+
 function stopCamera() {
   clearTimeout(holdTimer);
   holdActive = false;
@@ -221,8 +235,8 @@ async function detectNativeBarcode(image) {
   if (!detector) return undefined;
   const results = await detector.detect(image);
   return results
-    .map((result) => normalizeTracking(result.rawValue))
-    .find(isTracking);
+    .map((result) => extractTrackingFromPayload(result.rawValue))
+    .find(Boolean);
 }
 
 async function detectZxingBarcode(image) {
@@ -230,8 +244,7 @@ async function detectZxingBarcode(image) {
   zxingReader ||= new ZXingBrowser.BrowserMultiFormatReader();
   try {
     const result = zxingReader.decodeFromCanvas(image);
-    const tracking = normalizeTracking(result.getText());
-    return isTracking(tracking) ? tracking : undefined;
+    return extractTrackingFromPayload(result.getText());
   } catch (error) {
     console.debug("ZXing did not find a barcode", error);
     return undefined;
@@ -294,7 +307,7 @@ async function scanOnce() {
       return;
     }
 
-    setStatus("Штрихкод не найден. Распознаём напечатанный текст…");
+    setStatus("Трек в коде не найден. Распознаём напечатанный текст…");
     const textImage = captureScanRegion(true);
     tracking = await recognizeTrackingText(textImage);
     if (tracking) {
@@ -347,7 +360,7 @@ async function scanWhileHeld(session) {
         now - lastOcrAt >= HOLD_OCR_INTERVAL_MS
       ) {
         lastOcrAt = now;
-        setStatus("Штрихкод не найден. Распознаём напечатанный текст…");
+        setStatus("Трек в коде не найден. Распознаём напечатанный текст…");
         const textImage = captureScanRegion(true);
         const textTracking = await recognizeTrackingText(
           textImage,

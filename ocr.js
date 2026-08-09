@@ -65,7 +65,7 @@
     return 0;
   }
 
-  function extractTracking(text) {
+  function extractTracking(text, { knownFormatsOnly = false } = {}) {
     const candidates = new Map();
 
     for (const line of String(text || "").toUpperCase().split(/\n+/)) {
@@ -80,7 +80,9 @@
           candidate += tokens[start + size - 1];
           if (candidate.length > 34) break;
           const score = candidateScore(candidate);
-          if (score) candidates.set(candidate, score);
+          if (score && (!knownFormatsOnly || score >= 85)) {
+            candidates.set(candidate, score);
+          }
         }
       }
     }

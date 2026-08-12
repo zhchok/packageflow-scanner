@@ -41,6 +41,8 @@ const HOLD_DELAY_MS = 320;
 const HOLD_RETRY_MS = 170;
 const HOLD_OCR_DELAY_MS = 700;
 const HOLD_OCR_INTERVAL_MS = 1800;
+const ZXING_INTEGRITY =
+  "sha384-HRtzk9lZgkbSgvUyQrnfC/GxiXZgwaNyD7hC9wcXlsBpDhkS80ISl73juef2FRuf"; // pragma: allowlist secret
 
 let stream;
 let detector;
@@ -171,6 +173,8 @@ function loadZxing() {
     const script = document.createElement("script");
     script.src =
       "https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js";
+    script.integrity = ZXING_INTEGRITY;
+    script.crossOrigin = "anonymous";
     script.async = true;
     script.onload = () => resolve(window.ZXingBrowser);
     script.onerror = () => reject(new Error("ZXing failed to load"));

@@ -3,6 +3,8 @@
 (() => {
   const TESSERACT_URL =
     "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js";
+  const TESSERACT_INTEGRITY =
+    "sha384-2BQ3U3OdKOb0Uczxqr41I9UvZkzr4V9Hv8uSzMMZAlmhsFClvdZX5wi5fDCzG+tM"; // pragma: allowlist secret
 
   let workerPromise;
   let progressListener;
@@ -16,6 +18,8 @@
 
       const script = document.createElement("script");
       script.src = TESSERACT_URL;
+      script.integrity = TESSERACT_INTEGRITY;
+      script.crossOrigin = "anonymous";
       script.async = true;
       script.onload = () => resolve(window.Tesseract);
       script.onerror = () => reject(new Error("Tesseract failed to load"));
@@ -32,7 +36,7 @@
           logger: (message) => progressListener?.(message),
         });
         await worker.setParameters({
-          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
+          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-", // pragma: allowlist secret
           tessedit_pageseg_mode: Tesseract.PSM?.SPARSE_TEXT ?? "11",
           preserve_interword_spaces: "1",
           user_defined_dpi: "150",

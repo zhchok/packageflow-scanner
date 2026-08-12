@@ -10,3 +10,7 @@ Static Telegram Mini App for button-triggered 1D/2D barcode and tracking-text sc
 - Uses the native `BarcodeDetector` API when available and ZXing as a compatibility fallback.
 
 The application contains no Telegram bot token, Google credentials, spreadsheet identifiers, or customer data.
+
+Changes are prepared and checked in `develop`; GitHub Pages serves only the
+reviewed `main` branch. GitHub Actions verifies CSP hardening, version and SRI
+pinning, forbidden browser APIs, and accidental embedded credentials.

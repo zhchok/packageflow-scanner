@@ -44,6 +44,7 @@ const HOLD_OCR_DELAY_MS = 700;
 const HOLD_OCR_INTERVAL_MS = 1800;
 const SINGLE_SCAN_BARCODE_ATTEMPTS = 2;
 const FOCUS_SETTLE_MS = 320;
+const PREFERRED_CAMERA_STORAGE_KEY = "packageflow.preferred-camera.v1";
 const ZXING_INTEGRITY =
   "sha384-HRtzk9lZgkbSgvUyQrnfC/GxiXZgwaNyD7hC9wcXlsBpDhkS80ISl73juef2FRuf"; // pragma: allowlist secret
 
@@ -92,13 +93,17 @@ function extractTrackingFromPayload(value, { knownFormatsOnly = false } = {}) {
   });
 }
 
-function stopCamera() {
+function pauseScanning() {
   clearTimeout(holdTimer);
   holdActive = false;
   holdSession += 1;
   scanOnceButton.classList.remove("is-held");
   scanning = false;
   scanOnceButton.disabled = true;
+}
+
+function stopCamera() {
+  pauseScanning();
   if (stream) {
     stream.getTracks().forEach((track) => track.stop());
     stream = undefined;
@@ -120,7 +125,9 @@ function presentCandidate(value, source = "barcode") {
   }
 
   pendingTracking = tracking;
-  stopCamera();
+  // Поток остаётся живым на экране подтверждения, потому что Telegram
+  // показывает системный запрос при каждом новом getUserMedia в одной сессии.
+  pauseScanning();
   cameraFrame.hidden = true;
   hint.hidden = true;
   actions.hidden = true;
@@ -146,6 +153,7 @@ function confirmCandidate() {
   confirmButton.disabled = true;
   rescanButton.disabled = true;
   setStatus(`Передаём боту: ${pendingTracking}`, "success");
+  stopCamera();
 
   if (telegram?.sendData) {
     telegram.sendData(
@@ -159,6 +167,27 @@ function confirmCandidate() {
   }
 }
 
+function hasLiveCamera() {
+  return Boolean(
+    stream?.getVideoTracks().some((track) => track.readyState === "live"),
+  );
+}
+
+async function resumeScanner() {
+  if (!hasLiveCamera()) {
+    await startScanner(activeVideoDeviceId);
+    return;
+  }
+
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  scanning = true;
+  scanOnceButton.disabled = false;
+  setStatus(
+    `Камера: ${cameraDiagnostics(track)}. Держите этикетку в 20–30 см и нажмите «Сканировать».`,
+  );
+}
+
 function rescan() {
   pendingTracking = undefined;
   completed = false;
@@ -169,7 +198,7 @@ function rescan() {
   actions.hidden = false;
   confirmButton.disabled = false;
   rescanButton.disabled = false;
-  startScanner(activeVideoDeviceId);
+  void resumeScanner();
 }
 
 function loadZxing() {
@@ -520,8 +549,8 @@ function cameraPreferenceScore(device, originalIndex = 0) {
   if (/(front|user|facetime|selfie|передн)/i.test(label)) score -= 1000;
   if (/(back|rear|environment|задн)/i.test(label)) score += 100;
 
-  // Prefer the normal 1× module. Ultra-wide and telephoto modules often
-  // cannot focus on a parcel label at normal scanning distance.
+  // Обычный модуль 1× фокусируется на этикетке с рабочего расстояния лучше,
+  // чем широкоугольный и telephoto-объективы.
   if (/(main|primary|standard|default|основн)/i.test(label)) score += 160;
   if (/(^|[^0-9])1(?:[.,]0)?\s*[x×]([^0-9]|$)/i.test(label)) score += 140;
   if (androidCameraNumber) {
@@ -549,15 +578,61 @@ function rankVideoDevices(cameras) {
     .map(({ device }) => device);
 }
 
+function readStoredPreferredCameraId() {
+  try {
+    return localStorage.getItem(PREFERRED_CAMERA_STORAGE_KEY) || undefined;
+  } catch (error) {
+    console.debug("Camera preference storage is unavailable", error);
+    return undefined;
+  }
+}
+
+function storePreferredCameraId(deviceId) {
+  if (!deviceId) return;
+  try {
+    localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, deviceId);
+  } catch (error) {
+    console.debug("Camera preference storage is unavailable", error);
+  }
+}
+
+async function preferredCameraBeforeAccess() {
+  const storedDeviceId = readStoredPreferredCameraId();
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter((device) => device.kind === "videoinput");
+    if (
+      storedDeviceId &&
+      (!cameras.length ||
+        cameras.some((device) => device.deviceId === storedDeviceId))
+    ) {
+      return storedDeviceId;
+    }
+
+    // До первого разрешения браузер скрывает названия камер. Выбираем
+    // конкретный объектив заранее только когда метки уже доступны, иначе
+    // facingMode безопаснее случайного выбора фронтальной камеры.
+    if (!cameras.some((device) => device.label)) return undefined;
+    if (isIosCameraOrder() && cameras.length >= 2) {
+      return cameras[1].deviceId || undefined;
+    }
+    const backCameras = cameras.filter(isLikelyBackCamera);
+    return rankVideoDevices(
+      backCameras.length ? backCameras : cameras,
+    )[0]?.deviceId;
+  } catch (error) {
+    console.debug("Camera list is unavailable before access", error);
+    return storedDeviceId;
+  }
+}
+
 async function refreshVideoDevices(track) {
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const cameras = devices.filter((device) => device.kind === "videoinput");
     if (isIosCameraOrder() && cameras.length >= 2) {
-      // WebKit exposes localized labels, but keeps the normal rear camera in
-      // the second video-input position after permission is granted. Put it
-      // first, keep other modules available manually, and put the front
-      // camera last.
+      // WebKit локализует названия, но после разрешения обычная задняя камера
+      // идёт второй. Ставим её первой, а фронтальную переносим в конец списка.
       availableVideoDevices = [
         cameras[1],
         ...cameras.slice(2),
@@ -775,6 +850,9 @@ async function startScanner(deviceId) {
       throw new Error("CAMERA_UNAVAILABLE");
     }
 
+    const requestedDeviceId =
+      deviceId || (await preferredCameraBeforeAccess());
+
     const videoConstraints = {
       width: { ideal: 2560 },
       height: { ideal: 1440 },
@@ -782,8 +860,8 @@ async function startScanner(deviceId) {
       focusMode: { ideal: "continuous" },
       resizeMode: { ideal: "none" },
     };
-    if (deviceId) {
-      videoConstraints.deviceId = { exact: deviceId };
+    if (requestedDeviceId) {
+      videoConstraints.deviceId = { exact: requestedDeviceId };
     } else {
       videoConstraints.facingMode = { ideal: "environment" };
     }
@@ -799,17 +877,11 @@ async function startScanner(deviceId) {
     const capabilities = track.getCapabilities?.() || {};
     await optimizeCameraTrack(track);
     const preferredDevice = await refreshVideoDevices(track);
-    if (
-      !deviceId &&
-      preferredDevice?.deviceId &&
-      activeVideoDeviceId &&
-      preferredDevice.deviceId !== activeVideoDeviceId
-    ) {
-      setStatus("Выбираем основную заднюю камеру 1×…");
-      stopCamera();
-      await startScanner(preferredDevice.deviceId);
-      return;
-    }
+    // Запоминаем основную камеру для следующего открытия, но не вызываем
+    // getUserMedia второй раз: Telegram показывает на такой вызов новый диалог.
+    storePreferredCameraId(
+      preferredDevice?.deviceId || activeVideoDeviceId,
+    );
     torchButton.hidden = !capabilities.torch;
 
     if ("BarcodeDetector" in window) {

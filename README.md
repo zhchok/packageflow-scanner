@@ -10,3 +10,14 @@ Static Telegram Mini App for button-triggered 1D/2D barcode and tracking-text sc
 - Uses the native `BarcodeDetector` API when available and ZXing as a compatibility fallback.
 
 The application contains no Telegram bot token, Google credentials, spreadsheet identifiers, or customer data.
+
+## Release flow
+
+- `develop` is deployed only to the DEV Mini App and is checked manually with DevPackageFlow.
+- `main` contains the approved production scanner.
+- Production is updated only after DEV checks and an explicit approval.
+
+The camera stream stays open while a recognized tracking number is being
+confirmed. This avoids repeated permission dialogs when the user chooses to
+scan again. The selected main rear camera is remembered locally for the next
+opening; camera frames never leave the device.

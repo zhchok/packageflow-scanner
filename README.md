@@ -21,3 +21,7 @@ The camera stream stays open while a recognized tracking number is being
 confirmed. This avoids repeated permission dialogs when the user chooses to
 scan again. The selected main rear camera is remembered locally for the next
 opening; camera frames never leave the device.
+
+Changes are prepared and checked in `develop`; GitHub Pages serves only the
+reviewed `main` branch. GitHub Actions verifies CSP hardening, version and SRI
+pinning, forbidden browser APIs, and accidental embedded credentials.

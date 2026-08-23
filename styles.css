@@ -80,7 +80,7 @@ h1 {
 
 .shade {
   position: absolute;
-  background: rgb(4 8 15 / 46%);
+  background: rgb(4 8 15 / 24%);
   pointer-events: none;
 }
 

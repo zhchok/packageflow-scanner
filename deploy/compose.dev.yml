@@ -1,0 +1,84 @@
+services:
+  scanner:
+    image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    container_name: packageflow-scanner
+    restart: unless-stopped
+    init: true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./site:/srv:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - default
+      - scanner_api
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dev-api:
+    build:
+      context: ../dev-api/source
+      dockerfile: Dockerfile
+    image: packageflow-dev-api:local
+    container_name: packageflow-dev-api
+    command: ["python", "-m", "scripts.receiving_api"]
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ./dev-api.env
+    environment:
+      BOT_TOKEN_FILE: /run/secrets/dev_telegram_bot_token
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/dev_google_service_account
+      RECEIVING_API_HOST: 0.0.0.0
+      RECEIVING_API_PORT: 8080
+      RECEIVING_API_ALLOWED_ORIGIN: https://scanner.204-48-24-237.sslip.io
+    secrets:
+      - dev_telegram_bot_token
+      - dev_google_service_account
+    expose:
+      - "8080"
+    healthcheck:
+      disable: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  dev_telegram_bot_token:
+    file: ./secrets/dev_telegram_bot_token
+  dev_google_service_account:
+    file: ./secrets/dev_google_service_account.json
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  scanner_api:
+    external: true
+    name: packageflow-scanner-api

@@ -23,6 +23,24 @@ const scanOnceButton = document.querySelector("#scan-once");
 const cancelConfirmationButton = document.querySelector(
   "#cancel-confirmation",
 );
+const receivingPanel = document.querySelector("#receiving");
+const receivingLabel = document.querySelector("#receiving-label");
+const receivingTracking = document.querySelector("#receiving-tracking");
+const receivingDetails = document.querySelector("#receiving-details");
+const receivingDecisions = document.querySelector("#receiving-decisions");
+const markTakenButton = document.querySelector("#mark-taken");
+const markErrorButton = document.querySelector("#mark-error");
+const receivingDetailForm = document.querySelector("#receiving-detail-form");
+const receivingDetailLabel = document.querySelector("#receiving-detail-label");
+const receivingDetail = document.querySelector("#receiving-detail");
+const saveDetailButton = document.querySelector("#save-detail");
+const cancelDetailButton = document.querySelector("#cancel-detail");
+const transferActions = document.querySelector("#transfer-actions");
+const transferPackageButton = document.querySelector("#transfer-package");
+const completedActions = document.querySelector("#completed-actions");
+const nextPackageButton = document.querySelector("#next-package");
+const finishSessionButton = document.querySelector("#finish-session");
+const cancelReceivingButton = document.querySelector("#cancel-receiving");
 
 const supportedFormats = [
   "code_128",
@@ -65,6 +83,11 @@ let holdActive = false;
 let holdSession = 0;
 let pressedPointerId;
 let longPressTriggered = false;
+let currentLookup;
+let detailMode;
+let receiverName = "";
+
+const receivingApiBase = new URL("api/receiving/", window.location.href);
 
 function setStatus(text, kind = "") {
   statusNode.textContent = text;
@@ -147,24 +170,228 @@ function presentCandidate(value, source = "barcode") {
   return true;
 }
 
-function confirmCandidate() {
+async function receivingApi(path, { method = "GET", body } = {}) {
+  if (!telegram?.initData) {
+    throw new Error("Откройте сканер через персональную кнопку в боте.");
+  }
+  const response = await fetch(new URL(path, receivingApiBase), {
+    method,
+    cache: "no-store",
+    credentials: "omit",
+    headers: {
+      Authorization: `tma ${telegram.initData}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    console.debug("Receiving API returned a non-JSON response", error);
+  }
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || "Сервис приёма временно недоступен. Попробуйте ещё раз.",
+    );
+  }
+  return payload;
+}
+
+function hideScannerViews() {
+  cameraFrame.hidden = true;
+  hint.hidden = true;
+  actions.hidden = true;
+  manualForm.hidden = true;
+  confirmation.hidden = true;
+}
+
+function resetWorkflowControls() {
+  receivingDecisions.hidden = true;
+  receivingDetailForm.hidden = true;
+  transferActions.hidden = true;
+  completedActions.hidden = true;
+  cancelReceivingButton.hidden = false;
+  receivingDetail.value = "";
+  detailMode = undefined;
+}
+
+function showDetailForm(mode) {
+  detailMode = mode;
+  receivingDecisions.hidden = true;
+  transferActions.hidden = true;
+  receivingDetailForm.hidden = false;
+  receivingDetailLabel.textContent =
+    mode === "unknown"
+      ? "Введите содержимое неизвестной посылки. Оно будет записано в комментарий:"
+      : mode === "taken"
+        ? "Введите содержимое этой части split-посылки:"
+        : "Опишите ошибку одним сообщением:";
+  receivingDetail.focus();
+}
+
+function showLookup(lookup) {
+  currentLookup = lookup;
+  resetWorkflowControls();
+  hideScannerViews();
+  receivingPanel.hidden = false;
+  receivingTracking.textContent = lookup.tracking;
+
+  if (lookup.kind === "package") {
+    receivingLabel.textContent = "Посылка найдена";
+    receivingDetails.textContent = [
+      `Товар: ${lookup.product || "не указан"}`,
+      `Текущий статус: ${lookup.status || "не указан"}`,
+      ...(lookup.is_split
+        ? [`Обработано частей: ${lookup.processed_count} из ${lookup.total_count}`]
+        : []),
+    ].join("\n");
+    receivingDecisions.hidden = false;
+    setStatus("Выберите результат приёма.", "success");
+    return;
+  }
+
+  if (lookup.kind === "unknown") {
+    receivingLabel.textContent = "Посылка не найдена";
+    receivingDetails.textContent =
+      "После ввода содержимого будет создана новая строка со статусом «Доставлено».";
+    showDetailForm("unknown");
+    setStatus("Укажите содержимое неизвестной посылки.");
+    return;
+  }
+
+  receivingLabel.textContent = "Трек закреплён за другим приёмщиком";
+  receivingDetails.textContent = [
+    `Приёмщик: ${lookup.assigned_receiver}`,
+    `Статус: ${lookup.assigned_status}`,
+    ...(lookup.is_split
+      ? [`Будет перенесена вся группа из ${lookup.total_count} треков.`]
+      : []),
+    "Если посылка физически у вас, перенесите её в свою таблицу.",
+  ].join("\n");
+  transferActions.hidden = false;
+  setStatus("Подтвердите перенос или отмените приём.", "error");
+}
+
+async function confirmCandidate() {
   if (completed || !pendingTracking) return;
   completed = true;
   confirmButton.disabled = true;
   rescanButton.disabled = true;
-  setStatus(`Передаём боту: ${pendingTracking}`, "success");
-  stopCamera();
-
-  if (telegram?.sendData) {
-    telegram.sendData(
-      JSON.stringify({ type: "barcode", value: pendingTracking }),
-    );
-  } else {
-    setStatus(
-      `Подтверждено локально: ${pendingTracking}. В Telegram номер будет передан боту.`,
-      "success",
-    );
+  setStatus(`Проверяем посылку ${pendingTracking}…`);
+  try {
+    const lookup = await receivingApi("lookup", {
+      method: "POST",
+      body: { tracking: pendingTracking },
+    });
+    showLookup(lookup);
+  } catch (error) {
+    console.error(error);
+    completed = false;
+    confirmButton.disabled = false;
+    rescanButton.disabled = false;
+    setStatus(error.message, "error");
   }
+}
+
+async function saveUnknown() {
+  saveDetailButton.disabled = true;
+  setStatus("Добавляем неизвестную посылку…");
+  try {
+    const lookup = await receivingApi("unknown", {
+      method: "POST",
+      body: {
+        tracking: currentLookup.tracking,
+        contents: receivingDetail.value,
+      },
+    });
+    showLookup(lookup);
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message, "error");
+  } finally {
+    saveDetailButton.disabled = false;
+  }
+}
+
+function completionMessage(result) {
+  if (result.is_split && !result.finalized) {
+    return [
+      "Результат части сохранён.",
+      `Обработано: ${result.processed_count} из ${result.total_count}.`,
+      "Статус всей посылки пока не изменён.",
+    ].join("\n");
+  }
+  return `Готово. Итоговый статус: ${result.final_status}.`;
+}
+
+async function completePackage(result, detail = "") {
+  const attemptedDetailMode = detailMode;
+  receivingDecisions.hidden = true;
+  receivingDetailForm.hidden = true;
+  setStatus("Сохраняем результат в Google Sheets…");
+  try {
+    const completion = await receivingApi("complete", {
+      method: "POST",
+      body: {
+        tracking: currentLookup.tracking,
+        result,
+        detail,
+      },
+    });
+    receivingLabel.textContent = "Приём сохранён";
+    receivingDetails.textContent = completionMessage(completion);
+    completedActions.hidden = false;
+    cancelReceivingButton.hidden = true;
+    setStatus("Можно сканировать следующую посылку.", "success");
+    navigator.vibrate?.([80, 40, 80]);
+    telegram?.HapticFeedback?.notificationOccurred("success");
+  } catch (error) {
+    console.error(error);
+    if (attemptedDetailMode === "taken" || attemptedDetailMode === "error") {
+      showDetailForm(attemptedDetailMode);
+    } else {
+      receivingDecisions.hidden = false;
+    }
+    setStatus(error.message, "error");
+  }
+}
+
+async function transferPackage() {
+  transferPackageButton.disabled = true;
+  setStatus("Переносим посылку в вашу таблицу…");
+  try {
+    const lookup = await receivingApi("transfer", {
+      method: "POST",
+      body: { tracking: currentLookup.tracking },
+    });
+    showLookup(lookup);
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message, "error");
+  } finally {
+    transferPackageButton.disabled = false;
+  }
+}
+
+function nextPackage() {
+  currentLookup = undefined;
+  pendingTracking = undefined;
+  completed = false;
+  candidateNode.textContent = "";
+  receivingPanel.hidden = true;
+  confirmation.hidden = true;
+  cameraFrame.hidden = false;
+  hint.hidden = false;
+  actions.hidden = false;
+  confirmButton.disabled = false;
+  rescanButton.disabled = false;
+  void resumeScanner();
+}
+
+function finishReceivingSession() {
+  stopCamera();
+  telegram?.close();
 }
 
 function hasLiveCamera() {
@@ -970,12 +1197,40 @@ manualForm.addEventListener("submit", (event) => {
   event.preventDefault();
   presentCandidate(manualValue.value);
 });
-confirmButton.addEventListener("click", confirmCandidate);
+confirmButton.addEventListener("click", () => void confirmCandidate());
 rescanButton.addEventListener("click", rescan);
 cancelConfirmationButton.addEventListener("click", () => {
-  stopCamera();
-  telegram?.close();
+  rescan();
 });
+markTakenButton.addEventListener("click", () => {
+  if (currentLookup?.is_split) {
+    showDetailForm("taken");
+    return;
+  }
+  void completePackage("taken");
+});
+markErrorButton.addEventListener("click", () => showDetailForm("error"));
+receivingDetailForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (detailMode === "unknown") {
+    void saveUnknown();
+    return;
+  }
+  void completePackage(detailMode, receivingDetail.value);
+});
+cancelDetailButton.addEventListener("click", () => {
+  if (currentLookup?.kind === "unknown") {
+    nextPackage();
+    return;
+  }
+  receivingDetailForm.hidden = true;
+  if (currentLookup?.kind === "package") receivingDecisions.hidden = false;
+  if (currentLookup?.kind === "transfer") transferActions.hidden = false;
+});
+transferPackageButton.addEventListener("click", () => void transferPackage());
+nextPackageButton.addEventListener("click", nextPackage);
+finishSessionButton.addEventListener("click", finishReceivingSession);
+cancelReceivingButton.addEventListener("click", nextPackage);
 closeButton.addEventListener("click", () => {
   stopCamera();
   telegram?.close();
@@ -984,4 +1239,22 @@ window.addEventListener("pagehide", stopCamera);
 
 telegram?.ready();
 telegram?.expand();
-startScanner();
+
+async function initializeReceiving() {
+  setStatus("Проверяем доступ к непрерывному приёму…");
+  try {
+    const session = await receivingApi("session");
+    receiverName = session.receiver || "";
+    await startScanner();
+    if (receiverName) {
+      setStatus(`Приёмщик: ${receiverName}. Камера готова.`);
+    }
+  } catch (error) {
+    console.error(error);
+    startButton.hidden = true;
+    scanOnceButton.disabled = true;
+    setStatus(error.message, "error");
+  }
+}
+
+void initializeReceiving();

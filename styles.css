@@ -80,7 +80,7 @@ h1 {
 
 .shade {
   position: absolute;
-  background: rgb(4 8 15 / 46%);
+  background: rgb(4 8 15 / 24%);
   pointer-events: none;
 }
 
@@ -200,6 +200,65 @@ h1 {
   text-align: center;
 }
 
+.workflow-panel {
+  margin: 14px 0;
+  padding: 18px;
+  border: 1px solid #33445f;
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.workflow-label {
+  margin: 0;
+  color: var(--muted);
+}
+
+.workflow-tracking {
+  margin: 10px 0;
+  color: var(--accent);
+  font-size: clamp(21px, 6vw, 30px);
+  overflow-wrap: anywhere;
+}
+
+.workflow-details {
+  margin: 0;
+  white-space: pre-line;
+  line-height: 1.45;
+}
+
+.workflow-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.workflow-form {
+  margin-top: 16px;
+}
+
+.workflow-form label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+
+.workflow-form textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #3a4b68;
+  border-radius: 12px;
+  background: #0a1322;
+  color: var(--text);
+  padding: 12px;
+  font: inherit;
+}
+
+.workflow-cancel {
+  width: 100%;
+  margin-top: 10px;
+}
+
 .confirmation-label,
 .confirmation-hint {
   margin: 0;
@@ -266,6 +325,11 @@ h1 {
   border-color: var(--accent-strong);
   background: var(--accent-strong);
   color: #06130f;
+}
+
+.button-danger {
+  border-color: #b94451;
+  background: #6f2932;
 }
 
 .button-quiet {

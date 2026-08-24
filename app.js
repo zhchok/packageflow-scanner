@@ -9,6 +9,7 @@ const statusNode = document.querySelector("#status");
 const actions = document.querySelector("#actions");
 const startButton = document.querySelector("#start");
 const torchButton = document.querySelector("#torch");
+const switchCameraButton = document.querySelector("#switch-camera");
 const manualButton = document.querySelector("#manual");
 const closeButton = document.querySelector("#close");
 const manualForm = document.querySelector("#manual-form");
@@ -22,6 +23,24 @@ const scanOnceButton = document.querySelector("#scan-once");
 const cancelConfirmationButton = document.querySelector(
   "#cancel-confirmation",
 );
+const receivingPanel = document.querySelector("#receiving");
+const receivingLabel = document.querySelector("#receiving-label");
+const receivingTracking = document.querySelector("#receiving-tracking");
+const receivingDetails = document.querySelector("#receiving-details");
+const receivingDecisions = document.querySelector("#receiving-decisions");
+const markTakenButton = document.querySelector("#mark-taken");
+const markErrorButton = document.querySelector("#mark-error");
+const receivingDetailForm = document.querySelector("#receiving-detail-form");
+const receivingDetailLabel = document.querySelector("#receiving-detail-label");
+const receivingDetail = document.querySelector("#receiving-detail");
+const saveDetailButton = document.querySelector("#save-detail");
+const cancelDetailButton = document.querySelector("#cancel-detail");
+const transferActions = document.querySelector("#transfer-actions");
+const transferPackageButton = document.querySelector("#transfer-package");
+const completedActions = document.querySelector("#completed-actions");
+const nextPackageButton = document.querySelector("#next-package");
+const finishSessionButton = document.querySelector("#finish-session");
+const cancelReceivingButton = document.querySelector("#cancel-receiving");
 
 const supportedFormats = [
   "code_128",
@@ -41,10 +60,19 @@ const HOLD_DELAY_MS = 320;
 const HOLD_RETRY_MS = 170;
 const HOLD_OCR_DELAY_MS = 700;
 const HOLD_OCR_INTERVAL_MS = 1800;
+const SINGLE_SCAN_BARCODE_ATTEMPTS = 2;
+const FOCUS_SETTLE_MS = 320;
+const PREFERRED_CAMERA_STORAGE_KEY = "packageflow.preferred-camera.v1";
+const ZXING_INTEGRITY =
+  "sha384-HRtzk9lZgkbSgvUyQrnfC/GxiXZgwaNyD7hC9wcXlsBpDhkS80ISl73juef2FRuf"; // pragma: allowlist secret
 
 let stream;
 let detector;
 let zxingReader;
+let nativeSupportedFormats = [];
+let availableVideoDevices = [];
+let activeVideoDeviceId;
+let activeVideoDeviceLabel = "";
 let scanning = false;
 let processing = false;
 let completed = false;
@@ -55,6 +83,11 @@ let holdActive = false;
 let holdSession = 0;
 let pressedPointerId;
 let longPressTriggered = false;
+let currentLookup;
+let detailMode;
+let receiverName = "";
+
+const receivingApiBase = new URL("api/receiving/", window.location.href);
 
 function setStatus(text, kind = "") {
   statusNode.textContent = text;
@@ -69,33 +102,38 @@ function isTracking(value) {
   return /^[A-Z0-9-]{3,100}$/.test(value);
 }
 
-function extractTrackingFromPayload(value) {
+function extractTrackingFromPayload(value, { knownFormatsOnly = false } = {}) {
   const rawValue = String(value || "").trim();
   const directValue = normalizeTracking(rawValue);
-  if (isTracking(directValue)) return directValue;
+  if (!knownFormatsOnly && isTracking(directValue)) return directValue;
 
   const readablePayload = rawValue.replace(
     /[\u0000-\u001f\u007f-\u009f]+/g,
     "\n",
   );
   return window.PackageFlowOcr.extractTracking(readablePayload, {
-    knownFormatsOnly: true,
+    knownFormatsOnly,
   });
 }
 
-function stopCamera() {
+function pauseScanning() {
   clearTimeout(holdTimer);
   holdActive = false;
   holdSession += 1;
   scanOnceButton.classList.remove("is-held");
   scanning = false;
   scanOnceButton.disabled = true;
+}
+
+function stopCamera() {
+  pauseScanning();
   if (stream) {
     stream.getTracks().forEach((track) => track.stop());
     stream = undefined;
   }
   video.srcObject = null;
   detector = undefined;
+  nativeSupportedFormats = [];
 }
 
 function presentCandidate(value, source = "barcode") {
@@ -110,7 +148,9 @@ function presentCandidate(value, source = "barcode") {
   }
 
   pendingTracking = tracking;
-  stopCamera();
+  // Поток остаётся живым на экране подтверждения, потому что Telegram
+  // показывает системный запрос при каждом новом getUserMedia в одной сессии.
+  pauseScanning();
   cameraFrame.hidden = true;
   hint.hidden = true;
   actions.hidden = true;
@@ -130,23 +170,249 @@ function presentCandidate(value, source = "barcode") {
   return true;
 }
 
-function confirmCandidate() {
+async function receivingApi(path, { method = "GET", body } = {}) {
+  if (!telegram?.initData) {
+    throw new Error("Откройте сканер через персональную кнопку в боте.");
+  }
+  const response = await fetch(new URL(path, receivingApiBase), {
+    method,
+    cache: "no-store",
+    credentials: "omit",
+    headers: {
+      Authorization: `tma ${telegram.initData}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    console.debug("Receiving API returned a non-JSON response", error);
+  }
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || "Сервис приёма временно недоступен. Попробуйте ещё раз.",
+    );
+  }
+  return payload;
+}
+
+function hideScannerViews() {
+  cameraFrame.hidden = true;
+  hint.hidden = true;
+  actions.hidden = true;
+  manualForm.hidden = true;
+  confirmation.hidden = true;
+}
+
+function resetWorkflowControls() {
+  receivingDecisions.hidden = true;
+  receivingDetailForm.hidden = true;
+  transferActions.hidden = true;
+  completedActions.hidden = true;
+  cancelReceivingButton.hidden = false;
+  receivingDetail.value = "";
+  detailMode = undefined;
+}
+
+function showDetailForm(mode) {
+  detailMode = mode;
+  receivingDecisions.hidden = true;
+  transferActions.hidden = true;
+  receivingDetailForm.hidden = false;
+  receivingDetailLabel.textContent =
+    mode === "unknown"
+      ? "Введите содержимое неизвестной посылки. Оно будет записано в комментарий:"
+      : mode === "taken"
+        ? "Введите содержимое этой части split-посылки:"
+        : "Опишите ошибку одним сообщением:";
+  receivingDetail.focus();
+}
+
+function showLookup(lookup) {
+  currentLookup = lookup;
+  resetWorkflowControls();
+  hideScannerViews();
+  receivingPanel.hidden = false;
+  receivingTracking.textContent = lookup.tracking;
+
+  if (lookup.kind === "package") {
+    receivingLabel.textContent = "Посылка найдена";
+    receivingDetails.textContent = [
+      `Товар: ${lookup.product || "не указан"}`,
+      `Текущий статус: ${lookup.status || "не указан"}`,
+      ...(lookup.is_split
+        ? [`Обработано частей: ${lookup.processed_count} из ${lookup.total_count}`]
+        : []),
+    ].join("\n");
+    receivingDecisions.hidden = false;
+    setStatus("Выберите результат приёма.", "success");
+    return;
+  }
+
+  if (lookup.kind === "unknown") {
+    receivingLabel.textContent = "Посылка не найдена";
+    receivingDetails.textContent =
+      "После ввода содержимого будет создана новая строка со статусом «Доставлено».";
+    showDetailForm("unknown");
+    setStatus("Укажите содержимое неизвестной посылки.");
+    return;
+  }
+
+  receivingLabel.textContent = "Трек закреплён за другим приёмщиком";
+  receivingDetails.textContent = [
+    `Приёмщик: ${lookup.assigned_receiver}`,
+    `Статус: ${lookup.assigned_status}`,
+    ...(lookup.is_split
+      ? [`Будет перенесена вся группа из ${lookup.total_count} треков.`]
+      : []),
+    "Если посылка физически у вас, перенесите её в свою таблицу.",
+  ].join("\n");
+  transferActions.hidden = false;
+  setStatus("Подтвердите перенос или отмените приём.", "error");
+}
+
+async function confirmCandidate() {
   if (completed || !pendingTracking) return;
   completed = true;
   confirmButton.disabled = true;
   rescanButton.disabled = true;
-  setStatus(`Передаём боту: ${pendingTracking}`, "success");
-
-  if (telegram?.sendData) {
-    telegram.sendData(
-      JSON.stringify({ type: "barcode", value: pendingTracking }),
-    );
-  } else {
-    setStatus(
-      `Подтверждено локально: ${pendingTracking}. В Telegram номер будет передан боту.`,
-      "success",
-    );
+  setStatus(`Проверяем посылку ${pendingTracking}…`);
+  try {
+    const lookup = await receivingApi("lookup", {
+      method: "POST",
+      body: { tracking: pendingTracking },
+    });
+    showLookup(lookup);
+  } catch (error) {
+    console.error(error);
+    completed = false;
+    confirmButton.disabled = false;
+    rescanButton.disabled = false;
+    setStatus(error.message, "error");
   }
+}
+
+async function saveUnknown() {
+  saveDetailButton.disabled = true;
+  setStatus("Добавляем неизвестную посылку…");
+  try {
+    const lookup = await receivingApi("unknown", {
+      method: "POST",
+      body: {
+        tracking: currentLookup.tracking,
+        contents: receivingDetail.value,
+      },
+    });
+    showLookup(lookup);
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message, "error");
+  } finally {
+    saveDetailButton.disabled = false;
+  }
+}
+
+function completionMessage(result) {
+  if (result.is_split && !result.finalized) {
+    return [
+      "Результат части сохранён.",
+      `Обработано: ${result.processed_count} из ${result.total_count}.`,
+      "Статус всей посылки пока не изменён.",
+    ].join("\n");
+  }
+  return `Готово. Итоговый статус: ${result.final_status}.`;
+}
+
+async function completePackage(result, detail = "") {
+  const attemptedDetailMode = detailMode;
+  receivingDecisions.hidden = true;
+  receivingDetailForm.hidden = true;
+  setStatus("Сохраняем результат в Google Sheets…");
+  try {
+    const completion = await receivingApi("complete", {
+      method: "POST",
+      body: {
+        tracking: currentLookup.tracking,
+        result,
+        detail,
+      },
+    });
+    receivingLabel.textContent = "Приём сохранён";
+    receivingDetails.textContent = completionMessage(completion);
+    completedActions.hidden = false;
+    cancelReceivingButton.hidden = true;
+    setStatus("Можно сканировать следующую посылку.", "success");
+    navigator.vibrate?.([80, 40, 80]);
+    telegram?.HapticFeedback?.notificationOccurred("success");
+  } catch (error) {
+    console.error(error);
+    if (attemptedDetailMode === "taken" || attemptedDetailMode === "error") {
+      showDetailForm(attemptedDetailMode);
+    } else {
+      receivingDecisions.hidden = false;
+    }
+    setStatus(error.message, "error");
+  }
+}
+
+async function transferPackage() {
+  transferPackageButton.disabled = true;
+  setStatus("Переносим посылку в вашу таблицу…");
+  try {
+    const lookup = await receivingApi("transfer", {
+      method: "POST",
+      body: { tracking: currentLookup.tracking },
+    });
+    showLookup(lookup);
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message, "error");
+  } finally {
+    transferPackageButton.disabled = false;
+  }
+}
+
+function nextPackage() {
+  currentLookup = undefined;
+  pendingTracking = undefined;
+  completed = false;
+  candidateNode.textContent = "";
+  receivingPanel.hidden = true;
+  confirmation.hidden = true;
+  cameraFrame.hidden = false;
+  hint.hidden = false;
+  actions.hidden = false;
+  confirmButton.disabled = false;
+  rescanButton.disabled = false;
+  void resumeScanner();
+}
+
+function finishReceivingSession() {
+  stopCamera();
+  telegram?.close();
+}
+
+function hasLiveCamera() {
+  return Boolean(
+    stream?.getVideoTracks().some((track) => track.readyState === "live"),
+  );
+}
+
+async function resumeScanner() {
+  if (!hasLiveCamera()) {
+    await startScanner(activeVideoDeviceId);
+    return;
+  }
+
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  scanning = true;
+  scanOnceButton.disabled = false;
+  setStatus(
+    `Камера: ${cameraDiagnostics(track)}. Держите этикетку в 20–30 см и нажмите «Сканировать».`,
+  );
 }
 
 function rescan() {
@@ -159,7 +425,7 @@ function rescan() {
   actions.hidden = false;
   confirmButton.disabled = false;
   rescanButton.disabled = false;
-  startScanner();
+  void resumeScanner();
 }
 
 function loadZxing() {
@@ -171,6 +437,8 @@ function loadZxing() {
     const script = document.createElement("script");
     script.src =
       "https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js";
+    script.integrity = ZXING_INTEGRITY;
+    script.crossOrigin = "anonymous";
     script.async = true;
     script.onload = () => resolve(window.ZXingBrowser);
     script.onerror = () => reject(new Error("ZXing failed to load"));
@@ -231,11 +499,56 @@ function captureScanRegion(enhanceForText = false) {
   return canvas;
 }
 
-async function detectNativeBarcode(image) {
+function enhancedBarcodeCanvas(source, threshold) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.filter = "grayscale(1) contrast(2.2)";
+  context.drawImage(source, 0, 0);
+  if (threshold === undefined) return canvas;
+
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const value = image.data[offset] < threshold ? 0 : 255;
+    image.data[offset] = value;
+    image.data[offset + 1] = value;
+    image.data[offset + 2] = value;
+  }
+  context.putImageData(image, 0, 0);
+  return canvas;
+}
+
+function rotatedCanvas(source, degrees) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate((degrees * Math.PI) / 180);
+  context.drawImage(source, -source.width / 2, -source.height / 2);
+  return canvas;
+}
+
+function barcodeCanvasVariants(source) {
+  const contrast = enhancedBarcodeCanvas(source);
+  const binary = enhancedBarcodeCanvas(source, 155);
+  return [
+    source,
+    contrast,
+    binary,
+    rotatedCanvas(binary, -3),
+    rotatedCanvas(binary, 3),
+  ];
+}
+
+async function detectNativeBarcode(image, options) {
   if (!detector) return undefined;
   const results = await detector.detect(image);
   return results
-    .map((result) => extractTrackingFromPayload(result.rawValue))
+    .map((result) => extractTrackingFromPayload(result.rawValue, options))
     .find(Boolean);
 }
 
@@ -251,24 +564,93 @@ async function detectZxingBarcode(image) {
   }
 }
 
+async function detectQuaggaCode128(image) {
+  if (!window.Quagga?.decodeSingle) return undefined;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => finish(undefined), 2500);
+
+    try {
+      window.Quagga.decodeSingle(
+        {
+          src: image.toDataURL("image/jpeg", 0.96),
+          numOfWorkers: 0,
+          locate: true,
+          inputStream: { size: 0, singleChannel: false },
+          locator: { halfSample: false, patchSize: "small" },
+          decoder: { readers: ["code_128_reader"] },
+        },
+        (result) => {
+          finish(extractTrackingFromPayload(result?.codeResult?.code));
+        },
+      );
+    } catch (error) {
+      console.debug("Quagga Code 128 scan failed", error);
+      finish(undefined);
+    }
+  });
+}
+
 async function detectBarcodeFromCurrentFrame() {
   const image = captureScanRegion();
   if (!image) throw new Error("FRAME_UNAVAILABLE");
 
   let tracking;
   try {
-    tracking = await detectNativeBarcode(image);
+    tracking = await detectNativeBarcode(video, { knownFormatsOnly: true });
+    if (!tracking) tracking = await detectNativeBarcode(image);
   } catch (error) {
     console.debug("Native barcode scan failed", error);
   }
   if (!tracking) {
-    try {
-      tracking = await detectZxingBarcode(image);
-    } catch (error) {
-      console.debug("ZXing barcode scan failed", error);
+    tracking = await detectQuaggaCode128(image);
+  }
+  if (!tracking) {
+    for (const variant of barcodeCanvasVariants(image)) {
+      try {
+        tracking = await detectZxingBarcode(variant);
+      } catch (error) {
+        console.debug("ZXing barcode scan failed", error);
+      }
+      if (tracking) break;
     }
   }
   return tracking;
+}
+
+function textRegionCanvas(source, startRatio = 0, heightRatio = 1) {
+  const sourceY = Math.round(source.height * startRatio);
+  const sourceHeight = Math.max(
+    1,
+    Math.min(source.height - sourceY, Math.round(source.height * heightRatio)),
+  );
+  const scale = Math.max(1, Math.min(2, 1700 / source.width));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(source.width * scale);
+  canvas.height = Math.round(sourceHeight * scale);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.filter = "grayscale(1) contrast(2.2)";
+  context.drawImage(
+    source,
+    0,
+    sourceY,
+    source.width,
+    sourceHeight,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+  return canvas;
 }
 
 async function recognizeTrackingText(image, isActive = () => true) {
@@ -283,14 +665,264 @@ async function recognizeTrackingText(image, isActive = () => true) {
     const progress = Math.round((message.progress || 0) * 100);
     setStatus(`Распознаём напечатанный трек… ${progress}%`);
   });
-  const {
-    data: { text },
-  } = await worker.recognize(image);
-  return window.PackageFlowOcr.extractTracking(text);
+  const pageModes = window.Tesseract?.PSM || {};
+  const variants = [
+    {
+      image: textRegionCanvas(image, 0.55, 0.45),
+      pageMode: pageModes.SPARSE_TEXT ?? "11",
+    },
+    {
+      image: textRegionCanvas(image, 0.4, 0.6),
+      pageMode: pageModes.SPARSE_TEXT ?? "11",
+    },
+    {
+      image: textRegionCanvas(image),
+      pageMode: pageModes.SPARSE_TEXT ?? "11",
+    },
+  ];
+
+  for (const variant of variants) {
+    if (!isActive()) return undefined;
+    await worker.setParameters({
+      tessedit_pageseg_mode: variant.pageMode,
+      user_defined_dpi: "300",
+    });
+    const {
+      data: { text },
+    } = await worker.recognize(variant.image);
+    const tracking = window.PackageFlowOcr.extractTracking(text, {
+      knownFormatsOnly: true,
+    });
+    if (tracking) return tracking;
+  }
+  return undefined;
 }
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function applyCameraConstraint(track, constraint) {
+  try {
+    await track.applyConstraints({ advanced: [constraint] });
+    return true;
+  } catch (error) {
+    console.debug("Camera constraint is unavailable", constraint, error);
+    return false;
+  }
+}
+
+function cameraFocusModes(track) {
+  const modes = track?.getCapabilities?.().focusMode;
+  return Array.isArray(modes) ? modes : [];
+}
+
+async function enableContinuousFocus(track) {
+  if (!cameraFocusModes(track).includes("continuous")) return false;
+  return applyCameraConstraint(track, { focusMode: "continuous" });
+}
+
+async function optimizeCameraTrack(track) {
+  try {
+    track.contentHint = "detail";
+  } catch (error) {
+    console.debug("Detailed camera content hint is unavailable", error);
+  }
+  await enableContinuousFocus(track);
+
+  const capabilities = track.getCapabilities?.() || {};
+  if (Array.isArray(capabilities.exposureMode)) {
+    if (capabilities.exposureMode.includes("continuous")) {
+      await applyCameraConstraint(track, { exposureMode: "continuous" });
+    }
+  }
+  if (
+    Array.isArray(capabilities.whiteBalanceMode) &&
+    capabilities.whiteBalanceMode.includes("continuous")
+  ) {
+    await applyCameraConstraint(track, { whiteBalanceMode: "continuous" });
+  }
+  if (
+    capabilities.exposureCompensation &&
+    Number.isFinite(capabilities.exposureCompensation.min) &&
+    Number.isFinite(capabilities.exposureCompensation.max)
+  ) {
+    const compensation = Math.min(
+      capabilities.exposureCompensation.max,
+      Math.max(capabilities.exposureCompensation.min, -0.5),
+    );
+    await applyCameraConstraint(track, { exposureCompensation: compensation });
+  }
+}
+
+function isLikelyBackCamera(device) {
+  return !/(front|user|facetime|передн)/i.test(device.label || "");
+}
+
+function isIosCameraOrder() {
+  const userAgent = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  return (
+    /iPad|iPhone|iPod/i.test(userAgent) ||
+    (platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
+}
+
+function cameraPreferenceScore(device, originalIndex = 0) {
+  const label = String(device.label || "").toLowerCase();
+  let score = -originalIndex;
+  const androidCameraNumber = label.match(/camera\s*([0-9]+)\b/i);
+
+  if (/(front|user|facetime|selfie|передн)/i.test(label)) score -= 1000;
+  if (/(back|rear|environment|задн)/i.test(label)) score += 100;
+
+  // Обычный модуль 1× фокусируется на этикетке с рабочего расстояния лучше,
+  // чем широкоугольный и telephoto-объективы.
+  if (/(main|primary|standard|default|основн)/i.test(label)) score += 160;
+  if (/(^|[^0-9])1(?:[.,]0)?\s*[x×]([^0-9]|$)/i.test(label)) score += 140;
+  if (androidCameraNumber) {
+    const cameraNumber = Number(androidCameraNumber[1]);
+    if (cameraNumber === 0) score += 320;
+    if (cameraNumber >= 2) score -= cameraNumber * 90;
+  }
+  if (/(ultra[\s_-]*wide|ultrawide|super[\s_-]*wide|0[.,][56]\s*[x×]?|fisheye|рыб.*глаз)/i.test(label)) {
+    score -= 500;
+  }
+  if (/(telephoto|tele\b|2\s*[x×]|3\s*[x×]|5\s*[x×])/i.test(label)) {
+    score -= 260;
+  }
+  return score;
+}
+
+function rankVideoDevices(cameras) {
+  return cameras
+    .map((device, originalIndex) => ({
+      device,
+      originalIndex,
+      score: cameraPreferenceScore(device, originalIndex),
+    }))
+    .sort((left, right) => right.score - left.score)
+    .map(({ device }) => device);
+}
+
+function readStoredPreferredCameraId() {
+  try {
+    return localStorage.getItem(PREFERRED_CAMERA_STORAGE_KEY) || undefined;
+  } catch (error) {
+    console.debug("Camera preference storage is unavailable", error);
+    return undefined;
+  }
+}
+
+function storePreferredCameraId(deviceId) {
+  if (!deviceId) return;
+  try {
+    localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, deviceId);
+  } catch (error) {
+    console.debug("Camera preference storage is unavailable", error);
+  }
+}
+
+async function preferredCameraBeforeAccess() {
+  const storedDeviceId = readStoredPreferredCameraId();
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter((device) => device.kind === "videoinput");
+    if (
+      storedDeviceId &&
+      (!cameras.length ||
+        cameras.some((device) => device.deviceId === storedDeviceId))
+    ) {
+      return storedDeviceId;
+    }
+
+    // До первого разрешения браузер скрывает названия камер. Выбираем
+    // конкретный объектив заранее только когда метки уже доступны, иначе
+    // facingMode безопаснее случайного выбора фронтальной камеры.
+    if (!cameras.some((device) => device.label)) return undefined;
+    if (isIosCameraOrder() && cameras.length >= 2) {
+      return cameras[1].deviceId || undefined;
+    }
+    const backCameras = cameras.filter(isLikelyBackCamera);
+    return rankVideoDevices(
+      backCameras.length ? backCameras : cameras,
+    )[0]?.deviceId;
+  } catch (error) {
+    console.debug("Camera list is unavailable before access", error);
+    return storedDeviceId;
+  }
+}
+
+async function refreshVideoDevices(track) {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter((device) => device.kind === "videoinput");
+    if (isIosCameraOrder() && cameras.length >= 2) {
+      // WebKit локализует названия, но после разрешения обычная задняя камера
+      // идёт второй. Ставим её первой, а фронтальную переносим в конец списка.
+      availableVideoDevices = [
+        cameras[1],
+        ...cameras.slice(2),
+        cameras[0],
+      ];
+    } else {
+      const backCameras = cameras.filter(isLikelyBackCamera);
+      availableVideoDevices = rankVideoDevices(
+        backCameras.length ? backCameras : cameras,
+      );
+    }
+    activeVideoDeviceId = track.getSettings?.().deviceId;
+    const activeCamera = availableVideoDevices.find(
+      (device) => device.deviceId === activeVideoDeviceId,
+    );
+    activeVideoDeviceLabel = activeCamera?.label || track.label || "";
+    switchCameraButton.hidden = availableVideoDevices.length < 2;
+    return availableVideoDevices[0];
+  } catch (error) {
+    console.debug("Camera list is unavailable", error);
+    availableVideoDevices = [];
+    activeVideoDeviceId = track.getSettings?.().deviceId;
+    activeVideoDeviceLabel = track.label || "";
+    switchCameraButton.hidden = true;
+    return undefined;
+  }
+}
+
+function cameraDiagnostics(track) {
+  const settings = track.getSettings?.() || {};
+  const modes = cameraFocusModes(track);
+  const resolution =
+    settings.width && settings.height
+      ? `${settings.width}×${settings.height}`
+      : "разрешение не указано";
+  const focus =
+    settings.focusMode ||
+    (modes.includes("continuous") ? "continuous" : "управляет телефон");
+  const nativeCode128 = nativeSupportedFormats.includes("code_128")
+    ? "да"
+    : "нет";
+  const exposure = settings.exposureMode || "авто";
+  const cameraName = activeVideoDeviceLabel || "основная задняя камера";
+  return `${cameraName}; ${resolution}; фокус: ${focus}; экспозиция: ${exposure}; системный Code 128: ${nativeCode128}`;
+}
+
+async function refocusCamera() {
+  const track = stream?.getVideoTracks()[0];
+  if (!track) return false;
+
+  const modes = cameraFocusModes(track);
+  let focused = false;
+  if (modes.includes("single-shot")) {
+    focused = await applyCameraConstraint(track, { focusMode: "single-shot" });
+  } else if (modes.includes("continuous")) {
+    focused = await enableContinuousFocus(track);
+  }
+
+  if (focused) {
+    await wait(FOCUS_SETTLE_MS);
+    await enableContinuousFocus(track);
+  }
+  return focused;
 }
 
 async function scanOnce() {
@@ -298,17 +930,23 @@ async function scanOnce() {
   processing = true;
   scanOnceButton.disabled = true;
   cameraFrame.classList.add("is-processing");
-  setStatus("Считываем штрихкод и QR…");
+  setStatus("Фокусируем камеру…");
 
   try {
-    let tracking = await detectBarcodeFromCurrentFrame();
-    if (tracking) {
-      presentCandidate(tracking);
-      return;
+    await refocusCamera();
+    setStatus("Считываем штрихкод и QR…");
+    let tracking;
+    for (let attempt = 0; attempt < SINGLE_SCAN_BARCODE_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await wait(140);
+      tracking = await detectBarcodeFromCurrentFrame();
+      if (tracking) {
+        presentCandidate(tracking);
+        return;
+      }
     }
 
     setStatus("Трек в коде не найден. Распознаём напечатанный текст…");
-    const textImage = captureScanRegion(true);
+    const textImage = captureScanRegion();
     tracking = await recognizeTrackingText(textImage);
     if (tracking) {
       presentCandidate(tracking, "text");
@@ -340,6 +978,7 @@ async function scanWhileHeld(session) {
   let lastOcrAt = startedAt - HOLD_OCR_INTERVAL_MS;
 
   try {
+    await refocusCamera();
     while (
       holdActive &&
       session === holdSession &&
@@ -361,7 +1000,7 @@ async function scanWhileHeld(session) {
       ) {
         lastOcrAt = now;
         setStatus("Трек в коде не найден. Распознаём напечатанный текст…");
-        const textImage = captureScanRegion(true);
+        const textImage = captureScanRegion();
         const textTracking = await recognizeTrackingText(
           textImage,
           () => holdActive && session === holdSession,
@@ -428,7 +1067,7 @@ function finishScanPress(event, cancelled = false) {
   if (!cancelled) void scanOnce();
 }
 
-async function startScanner() {
+async function startScanner(deviceId) {
   if (scanning || completed) return;
   startButton.hidden = true;
   setStatus("Запрашиваем доступ к камере…");
@@ -438,19 +1077,38 @@ async function startScanner() {
       throw new Error("CAMERA_UNAVAILABLE");
     }
 
+    const requestedDeviceId =
+      deviceId || (await preferredCameraBeforeAccess());
+
+    const videoConstraints = {
+      width: { ideal: 2560 },
+      height: { ideal: 1440 },
+      frameRate: { ideal: 30 },
+      focusMode: { ideal: "continuous" },
+      resizeMode: { ideal: "none" },
+    };
+    if (requestedDeviceId) {
+      videoConstraints.deviceId = { exact: requestedDeviceId };
+    } else {
+      videoConstraints.facingMode = { ideal: "environment" };
+    }
+
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
+      video: videoConstraints,
     });
     video.srcObject = stream;
     await video.play();
 
     const track = stream.getVideoTracks()[0];
     const capabilities = track.getCapabilities?.() || {};
+    await optimizeCameraTrack(track);
+    const preferredDevice = await refreshVideoDevices(track);
+    // Запоминаем основную камеру для следующего открытия, но не вызываем
+    // getUserMedia второй раз: Telegram показывает на такой вызов новый диалог.
+    storePreferredCameraId(
+      preferredDevice?.deviceId || activeVideoDeviceId,
+    );
     torchButton.hidden = !capabilities.torch;
 
     if ("BarcodeDetector" in window) {
@@ -458,11 +1116,14 @@ async function startScanner() {
       const formats = supportedFormats.filter((format) =>
         available.includes(format),
       );
+      nativeSupportedFormats = formats;
       if (formats.length) detector = new BarcodeDetector({ formats });
     }
     scanning = true;
     scanOnceButton.disabled = false;
-    setStatus("Камера готова. Наведите её и нажмите «Сканировать».");
+    setStatus(
+      `Камера: ${cameraDiagnostics(track)}. Держите этикетку в 20–30 см и нажмите «Сканировать».`,
+    );
   } catch (error) {
     console.error(error);
     stopCamera();
@@ -473,6 +1134,29 @@ async function startScanner() {
     );
   }
 }
+
+switchCameraButton.addEventListener("click", async () => {
+  if (availableVideoDevices.length < 2 || processing || completed) return;
+  const currentIndex = availableVideoDevices.findIndex(
+    (device) => device.deviceId === activeVideoDeviceId,
+  );
+  const nextIndex = (currentIndex + 1) % availableVideoDevices.length;
+  const nextDevice = availableVideoDevices[nextIndex];
+  setStatus("Переключаем камеру…");
+  stopCamera();
+  await startScanner(nextDevice.deviceId);
+});
+
+cameraFrame.addEventListener("click", async () => {
+  if (!scanning || processing || completed) return;
+  setStatus("Фокусируем камеру по центру рамки…");
+  const focused = await refocusCamera();
+  setStatus(
+    focused
+      ? "Фокус готов. Нажмите «Сканировать»."
+      : "Автофокус управляется телефоном. Держите этикетку в 20–30 см от камеры.",
+  );
+});
 
 torchButton.addEventListener("click", async () => {
   const track = stream?.getVideoTracks()[0];
@@ -487,7 +1171,7 @@ torchButton.addEventListener("click", async () => {
   }
 });
 
-startButton.addEventListener("click", startScanner);
+startButton.addEventListener("click", () => startScanner());
 scanOnceButton.addEventListener("pointerdown", beginScanPress);
 scanOnceButton.addEventListener("pointerup", (event) =>
   finishScanPress(event),
@@ -513,12 +1197,40 @@ manualForm.addEventListener("submit", (event) => {
   event.preventDefault();
   presentCandidate(manualValue.value);
 });
-confirmButton.addEventListener("click", confirmCandidate);
+confirmButton.addEventListener("click", () => void confirmCandidate());
 rescanButton.addEventListener("click", rescan);
 cancelConfirmationButton.addEventListener("click", () => {
-  stopCamera();
-  telegram?.close();
+  rescan();
 });
+markTakenButton.addEventListener("click", () => {
+  if (currentLookup?.is_split) {
+    showDetailForm("taken");
+    return;
+  }
+  void completePackage("taken");
+});
+markErrorButton.addEventListener("click", () => showDetailForm("error"));
+receivingDetailForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (detailMode === "unknown") {
+    void saveUnknown();
+    return;
+  }
+  void completePackage(detailMode, receivingDetail.value);
+});
+cancelDetailButton.addEventListener("click", () => {
+  if (currentLookup?.kind === "unknown") {
+    nextPackage();
+    return;
+  }
+  receivingDetailForm.hidden = true;
+  if (currentLookup?.kind === "package") receivingDecisions.hidden = false;
+  if (currentLookup?.kind === "transfer") transferActions.hidden = false;
+});
+transferPackageButton.addEventListener("click", () => void transferPackage());
+nextPackageButton.addEventListener("click", nextPackage);
+finishSessionButton.addEventListener("click", finishReceivingSession);
+cancelReceivingButton.addEventListener("click", nextPackage);
 closeButton.addEventListener("click", () => {
   stopCamera();
   telegram?.close();
@@ -527,4 +1239,22 @@ window.addEventListener("pagehide", stopCamera);
 
 telegram?.ready();
 telegram?.expand();
-startScanner();
+
+async function initializeReceiving() {
+  setStatus("Проверяем доступ к непрерывному приёму…");
+  try {
+    const session = await receivingApi("session");
+    receiverName = session.receiver || "";
+    await startScanner();
+    if (receiverName) {
+      setStatus(`Приёмщик: ${receiverName}. Камера готова.`);
+    }
+  } catch (error) {
+    console.error(error);
+    startButton.hidden = true;
+    scanOnceButton.disabled = true;
+    setStatus(error.message, "error");
+  }
+}
+
+void initializeReceiving();

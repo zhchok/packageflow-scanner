@@ -1,0 +1,26 @@
+scanner.204-48-24-237.sslip.io {
+    handle /dev/api/* {
+        uri strip_prefix /dev
+        reverse_proxy packageflow-dev-api:8080
+    }
+
+    handle /api/* {
+        reverse_proxy packageflow-prod-api:8080
+    }
+
+    handle {
+        root * /srv
+        encode zstd gzip
+        file_server
+    }
+
+    @html path / /index.html /dev /dev/ /dev/index.html
+    header @html Cache-Control "no-store"
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(self), microphone=(), geolocation=()"
+        -Server
+    }
+}

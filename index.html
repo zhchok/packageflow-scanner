@@ -6,14 +6,20 @@
     <meta name="theme-color" content="#101827" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://telegram.org https://unpkg.com https://cdn.jsdelivr.net; style-src 'self'; media-src 'self' blob:; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; img-src 'self' data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net"
+      content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' https://telegram.org https://unpkg.com https://cdn.jsdelivr.net; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; media-src 'self' blob:; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; img-src 'self' data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net"
     />
     <title>PackageFlow Scanner</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="styles.css?v=6" />
+    <link rel="stylesheet" href="styles.css?v=8" />
     <script src="https://telegram.org/js/telegram-web-app.js?61"></script>
-    <script src="ocr.js?v=6" defer></script>
-    <script src="app.js?v=6" defer></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.12.1/dist/quagga.min.js"
+      integrity="sha384-ZJs/WA0v1/wkDHl7QklRGGJe837hXnRR0k8lSFjjc0w2bGtl2Q1M/3JSFn9IJRFU"
+      crossorigin="anonymous"
+      defer
+    ></script>
+    <script src="ocr.js?v=11" defer></script>
+    <script src="app.js?v=19" defer></script>
   </head>
   <body>
     <main class="scanner-shell">
@@ -66,6 +72,58 @@
         </div>
       </section>
 
+      <section id="receiving" class="workflow-panel" hidden>
+        <p id="receiving-label" class="workflow-label">Посылка найдена</p>
+        <h2 id="receiving-tracking" class="workflow-tracking"></h2>
+        <p id="receiving-details" class="workflow-details"></p>
+
+        <div id="receiving-decisions" class="workflow-actions" hidden>
+          <button id="mark-taken" class="button button-primary" type="button">
+            ✅ Забрал
+          </button>
+          <button id="mark-error" class="button button-danger" type="button">
+            ⚠️ Ошибка
+          </button>
+        </div>
+
+        <form id="receiving-detail-form" class="workflow-form" hidden>
+          <label id="receiving-detail-label" for="receiving-detail"></label>
+          <textarea
+            id="receiving-detail"
+            maxlength="500"
+            rows="4"
+            autocomplete="off"
+          ></textarea>
+          <div class="workflow-actions">
+            <button id="save-detail" class="button button-primary" type="submit">
+              Сохранить
+            </button>
+            <button id="cancel-detail" class="button" type="button">
+              Назад
+            </button>
+          </div>
+        </form>
+
+        <div id="transfer-actions" class="workflow-actions" hidden>
+          <button id="transfer-package" class="button button-primary" type="button">
+            Принять у себя
+          </button>
+        </div>
+
+        <div id="completed-actions" class="workflow-actions" hidden>
+          <button id="next-package" class="button button-primary" type="button">
+            📷 Следующая посылка
+          </button>
+          <button id="finish-session" class="button" type="button">
+            Завершить приём
+          </button>
+        </div>
+
+        <button id="cancel-receiving" class="button button-quiet workflow-cancel" type="button">
+          Отмена
+        </button>
+      </section>
+
       <div id="actions" class="actions">
         <button
           id="scan-once"
@@ -80,6 +138,9 @@
         </button>
         <button id="torch" class="button" type="button" hidden>
           🔦 Фонарик
+        </button>
+        <button id="switch-camera" class="button" type="button" hidden>
+          🔄 Сменить камеру
         </button>
         <button id="manual" class="button" type="button">
           Ввести трек вручную
@@ -105,7 +166,7 @@
             maxlength="100"
             placeholder="Например, TBA123456789"
           />
-          <button class="button button-primary" type="submit">Передать</button>
+          <button class="button button-primary" type="submit">Проверить</button>
         </div>
       </form>
     </main>

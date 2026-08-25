@@ -30,6 +30,19 @@ const receivingDetails = document.querySelector("#receiving-details");
 const receivingDecisions = document.querySelector("#receiving-decisions");
 const markTakenButton = document.querySelector("#mark-taken");
 const markErrorButton = document.querySelector("#mark-error");
+const splitContentsPanel = document.querySelector("#split-contents");
+const splitItemsNode = document.querySelector("#split-items");
+const splitSummaryNode = document.querySelector("#split-summary");
+const splitWarningNode = document.querySelector("#split-warning");
+const splitReplacementButton = document.querySelector("#split-replacement");
+const splitExtraButton = document.querySelector("#split-extra");
+const splitConfirmButton = document.querySelector("#split-confirm");
+const splitBackButton = document.querySelector("#split-back");
+const splitManualForm = document.querySelector("#split-manual-form");
+const splitManualLabel = document.querySelector("#split-manual-label");
+const splitExpectedItem = document.querySelector("#split-expected-item");
+const splitManualValue = document.querySelector("#split-manual-value");
+const splitManualBackButton = document.querySelector("#split-manual-back");
 const receivingDetailForm = document.querySelector("#receiving-detail-form");
 const receivingDetailLabel = document.querySelector("#receiving-detail-label");
 const receivingDetail = document.querySelector("#receiving-detail");
@@ -86,6 +99,8 @@ let longPressTriggered = false;
 let currentLookup;
 let detailMode;
 let receiverName = "";
+let splitSelection = { selected: {}, replacements: [], extras: [] };
+let splitManualMode;
 
 function receivingApiBaseUrl() {
   const currentUrl = new URL(window.location.href);
@@ -235,11 +250,221 @@ function hideScannerViews() {
 function resetWorkflowControls() {
   receivingDecisions.hidden = true;
   receivingDetailForm.hidden = true;
+  splitContentsPanel.hidden = true;
+  splitManualForm.hidden = true;
   transferActions.hidden = true;
   completedActions.hidden = true;
   cancelReceivingButton.hidden = false;
   receivingDetail.value = "";
   detailMode = undefined;
+  splitManualMode = undefined;
+}
+
+function productKey(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function resetSplitSelection() {
+  splitSelection = { selected: {}, replacements: [], extras: [] };
+  splitManualMode = undefined;
+  splitManualValue.value = "";
+}
+
+function splitRemainingItems() {
+  return Array.isArray(currentLookup?.split_contents?.remaining)
+    ? currentLookup.split_contents.remaining
+    : [];
+}
+
+function replacementCountFor(name) {
+  const key = productKey(name);
+  return splitSelection.replacements
+    .filter((replacement) => productKey(replacement.expected) === key)
+    .reduce((total, replacement) => total + replacement.quantity, 0);
+}
+
+function selectableQuantity(item) {
+  return Math.max(0, item.quantity - replacementCountFor(item.name));
+}
+
+function availableReplacementItems() {
+  return splitRemainingItems()
+    .map((item) => ({
+      ...item,
+      quantity:
+        selectableQuantity(item) -
+        (splitSelection.selected[productKey(item.name)] || 0),
+    }))
+    .filter((item) => item.quantity > 0);
+}
+
+function selectedSplitCount() {
+  return (
+    Object.values(splitSelection.selected).reduce(
+      (total, quantity) => total + quantity,
+      0,
+    ) +
+    splitSelection.replacements.reduce(
+      (total, replacement) => total + replacement.quantity,
+      0,
+    ) +
+    splitSelection.extras.reduce(
+      (total, item) => total + item.quantity,
+      0,
+    )
+  );
+}
+
+function splitMissingAfterSelection() {
+  return splitRemainingItems()
+    .map((item) => ({
+      name: item.name,
+      quantity:
+        selectableQuantity(item) -
+        (splitSelection.selected[productKey(item.name)] || 0),
+    }))
+    .filter((item) => item.quantity > 0);
+}
+
+function splitWillBeError() {
+  return Boolean(
+    currentLookup?.split_contents?.previous_mismatch ||
+      splitSelection.replacements.length ||
+      splitSelection.extras.length ||
+      (currentLookup?.split_contents?.is_last_part &&
+        splitMissingAfterSelection().length),
+  );
+}
+
+function renderSplitSummary() {
+  const displayNames = Object.fromEntries(
+    splitRemainingItems().map((item) => [productKey(item.name), item.name]),
+  );
+  const lines = [];
+  for (const [key, quantity] of Object.entries(splitSelection.selected)) {
+    if (quantity > 0) lines.push(`• ${quantity} × ${displayNames[key] || key}`);
+  }
+  for (const replacement of splitSelection.replacements) {
+    lines.push(`• Замена: ${replacement.expected} → ${replacement.actual}`);
+  }
+  for (const item of splitSelection.extras) {
+    lines.push(`• Дополнительно: ${item.quantity} × ${item.name}`);
+  }
+  splitSummaryNode.textContent = lines.length
+    ? `Выбрано:\n${lines.join("\n")}`
+    : "";
+
+  const warnings = [];
+  if (currentLookup?.split_contents?.is_last_part) {
+    const missing = splitMissingAfterSelection();
+    if (missing.length) {
+      warnings.push(
+        `Это последняя коробка. Не получено: ${missing
+          .map((item) => `${item.quantity} × ${item.name}`)
+          .join("; ")}.`,
+      );
+    }
+  }
+  if (
+    currentLookup?.split_contents?.previous_mismatch ||
+    splitSelection.replacements.length ||
+    splitSelection.extras.length
+  ) {
+    warnings.push("Итоговый статус будет «Ошибка».");
+  }
+  splitWarningNode.textContent = warnings.join(" ");
+  splitWarningNode.hidden = !warnings.length;
+  splitConfirmButton.disabled = selectedSplitCount() === 0;
+  splitConfirmButton.textContent = splitWillBeError()
+    ? "⚠️ Сохранить с ошибкой"
+    : "✅ Подтвердить содержимое";
+}
+
+function renderSplitSelector() {
+  splitItemsNode.replaceChildren();
+  for (const item of splitRemainingItems()) {
+    const key = productKey(item.name);
+    const maximum = selectableQuantity(item);
+    const selected = Math.min(
+      maximum,
+      splitSelection.selected[key] || 0,
+    );
+    splitSelection.selected[key] = selected;
+
+    const row = document.createElement("div");
+    row.className = "split-item";
+    const subtract = document.createElement("button");
+    subtract.className = "split-stepper";
+    subtract.type = "button";
+    subtract.textContent = "−";
+    subtract.disabled = selected === 0;
+    subtract.addEventListener("click", () => {
+      splitSelection.selected[key] = Math.max(
+        0,
+        (splitSelection.selected[key] || 0) - 1,
+      );
+      renderSplitSelector();
+    });
+
+    const label = document.createElement("div");
+    label.className = "split-item-name";
+    label.textContent = item.name;
+    const count = document.createElement("span");
+    count.className = "split-item-count";
+    count.textContent = `${selected} из ${maximum}`;
+    label.append(count);
+
+    const add = document.createElement("button");
+    add.className = "split-stepper";
+    add.type = "button";
+    add.textContent = "+";
+    add.disabled = selected >= maximum;
+    add.addEventListener("click", () => {
+      splitSelection.selected[key] = Math.min(
+        maximum,
+        (splitSelection.selected[key] || 0) + 1,
+      );
+      renderSplitSelector();
+    });
+    row.append(subtract, label, add);
+    splitItemsNode.append(row);
+  }
+  splitReplacementButton.disabled = !availableReplacementItems().length;
+  renderSplitSummary();
+}
+
+function showSplitSelector({ reset = false } = {}) {
+  if (reset) resetSplitSelection();
+  receivingDecisions.hidden = true;
+  receivingDetailForm.hidden = true;
+  splitManualForm.hidden = true;
+  splitContentsPanel.hidden = false;
+  renderSplitSelector();
+  setStatus("Отметьте содержимое текущей коробки.");
+}
+
+function showSplitManualForm(mode) {
+  splitManualMode = mode;
+  splitContentsPanel.hidden = true;
+  splitManualForm.hidden = false;
+  splitManualValue.value = "";
+  if (mode === "replacement") {
+    splitManualLabel.textContent =
+      "Выберите ожидаемый товар и укажите, что пришло фактически:";
+    splitExpectedItem.replaceChildren();
+    for (const item of availableReplacementItems()) {
+      const option = document.createElement("option");
+      option.value = item.name;
+      option.textContent = `${item.quantity} × ${item.name}`;
+      splitExpectedItem.append(option);
+    }
+    splitExpectedItem.hidden = false;
+  } else {
+    splitManualLabel.textContent =
+      "Введите неожиданный товар и количество, например «2 Cable»:";
+    splitExpectedItem.hidden = true;
+  }
+  splitManualValue.focus();
 }
 
 function showDetailForm(mode) {
@@ -259,6 +484,7 @@ function showDetailForm(mode) {
 function showLookup(lookup) {
   currentLookup = lookup;
   resetWorkflowControls();
+  resetSplitSelection();
   hideScannerViews();
   receivingPanel.hidden = false;
   receivingTracking.textContent = lookup.tracking;
@@ -269,7 +495,14 @@ function showLookup(lookup) {
       `Товар: ${lookup.product || "не указан"}`,
       `Текущий статус: ${lookup.status || "не указан"}`,
       ...(lookup.is_split
-        ? [`Обработано частей: ${lookup.processed_count} из ${lookup.total_count}`]
+        ? [
+            `Обработано частей: ${lookup.processed_count} из ${lookup.total_count}`,
+            `Осталось товаров: ${
+              lookup.split_contents?.remaining
+                ?.map((item) => `${item.quantity} × ${item.name}`)
+                .join("; ") || "нет"
+            }`,
+          ]
         : []),
     ].join("\n");
     receivingDecisions.hidden = false;
@@ -382,6 +615,43 @@ async function completePackage(result, detail = "") {
     } else {
       receivingDecisions.hidden = false;
     }
+    setStatus(error.message, "error");
+  }
+}
+
+async function completeSplitPackage() {
+  splitConfirmButton.disabled = true;
+  setStatus("Сохраняем содержимое в Google Sheets…");
+  const selected = Object.fromEntries(
+    splitRemainingItems()
+      .map((item) => [
+        item.name,
+        splitSelection.selected[productKey(item.name)] || 0,
+      ])
+      .filter(([, quantity]) => quantity > 0),
+  );
+  try {
+    const completion = await receivingApi("complete-split", {
+      method: "POST",
+      body: {
+        tracking: currentLookup.tracking,
+        selected,
+        replacements: splitSelection.replacements,
+        extras: splitSelection.extras,
+      },
+    });
+    splitContentsPanel.hidden = true;
+    receivingLabel.textContent = "Приём сохранён";
+    receivingDetails.textContent = completionMessage(completion);
+    completedActions.hidden = false;
+    cancelReceivingButton.hidden = true;
+    setStatus("Можно сканировать следующую посылку.", "success");
+    navigator.vibrate?.([80, 40, 80]);
+    telegram?.HapticFeedback?.notificationOccurred("success");
+  } catch (error) {
+    console.error(error);
+    splitConfirmButton.disabled = false;
+    showSplitSelector();
     setStatus(error.message, "error");
   }
 }
@@ -1233,12 +1503,64 @@ cancelConfirmationButton.addEventListener("click", () => {
 });
 markTakenButton.addEventListener("click", () => {
   if (currentLookup?.is_split) {
-    showDetailForm("taken");
+    if (!currentLookup.split_contents) {
+      setStatus(
+        "Не удалось загрузить остаток товаров. Закройте Mini App и повторите поиск.",
+        "error",
+      );
+      return;
+    }
+    showSplitSelector({ reset: true });
     return;
   }
   void completePackage("taken");
 });
 markErrorButton.addEventListener("click", () => showDetailForm("error"));
+splitReplacementButton.addEventListener("click", () => {
+  if (!availableReplacementItems().length) {
+    setStatus("Нет ожидаемых товаров для замены.", "error");
+    return;
+  }
+  showSplitManualForm("replacement");
+});
+splitExtraButton.addEventListener("click", () => showSplitManualForm("extra"));
+splitConfirmButton.addEventListener("click", () => void completeSplitPackage());
+splitBackButton.addEventListener("click", () => {
+  splitContentsPanel.hidden = true;
+  receivingDecisions.hidden = false;
+  setStatus("Выберите результат приёма.");
+});
+splitManualBackButton.addEventListener("click", () => showSplitSelector());
+splitManualForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const rawValue = splitManualValue.value.trim().replace(/\s+/g, " ");
+  if (!rawValue) {
+    setStatus("Введите фактически полученный товар.", "error");
+    return;
+  }
+  if (splitManualMode === "replacement") {
+    const expected = splitExpectedItem.value;
+    if (!expected) {
+      setStatus("Выберите ожидаемый товар.", "error");
+      return;
+    }
+    splitSelection.replacements.push({
+      expected,
+      actual: rawValue,
+      quantity: 1,
+    });
+  } else {
+    const match = rawValue.match(/^(\d+)\s+(.+)$/);
+    const quantity = match ? Number(match[1]) : 1;
+    const name = (match ? match[2] : rawValue).trim();
+    if (!name || !Number.isInteger(quantity) || quantity < 1) {
+      setStatus("Используйте формат «2 Cable» или «Cable».", "error");
+      return;
+    }
+    splitSelection.extras.push({ name, quantity });
+  }
+  showSplitSelector();
+});
 receivingDetailForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (detailMode === "unknown") {

@@ -19,7 +19,7 @@
       defer
     ></script>
     <script src="ocr.js?v=11" defer></script>
-    <script src="app.js?v=21" defer></script>
+    <script src="app.js?v=22" defer></script>
   </head>
   <body>
     <main class="scanner-shell">
@@ -85,6 +85,50 @@
             ⚠️ Ошибка
           </button>
         </div>
+
+        <section id="split-contents" class="split-contents" hidden>
+          <p class="split-instruction">
+            Выберите товары, которые находятся именно в этой коробке:
+          </p>
+          <div id="split-items" class="split-items"></div>
+          <div id="split-summary" class="split-summary"></div>
+          <p id="split-warning" class="split-warning" hidden></p>
+          <div class="workflow-actions">
+            <button id="split-replacement" class="button" type="button">
+              ✏️ Замена товара
+            </button>
+            <button id="split-extra" class="button" type="button">
+              ➕ Другой товар
+            </button>
+          </div>
+          <button
+            id="split-confirm"
+            class="button button-primary split-confirm"
+            type="button"
+          >
+            ✅ Подтвердить содержимое
+          </button>
+          <button id="split-back" class="button button-quiet split-back" type="button">
+            Назад
+          </button>
+        </section>
+
+        <form id="split-manual-form" class="workflow-form" hidden>
+          <label id="split-manual-label" for="split-manual-value"></label>
+          <select id="split-expected-item" hidden></select>
+          <input
+            id="split-manual-value"
+            maxlength="200"
+            autocomplete="off"
+            placeholder="Фактически полученный товар"
+          />
+          <div class="workflow-actions">
+            <button class="button button-primary" type="submit">Добавить</button>
+            <button id="split-manual-back" class="button" type="button">
+              Назад
+            </button>
+          </div>
+        </form>
 
         <form id="receiving-detail-form" class="workflow-form" hidden>
           <label id="receiving-detail-label" for="receiving-detail"></label>

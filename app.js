@@ -87,7 +87,18 @@ let currentLookup;
 let detailMode;
 let receiverName = "";
 
-const receivingApiBase = new URL("api/receiving/", window.location.href);
+function receivingApiBaseUrl() {
+  const currentUrl = new URL(window.location.href);
+  const isDevScanner =
+    currentUrl.pathname === "/dev" || currentUrl.pathname.startsWith("/dev/");
+  const apiPrefix = isDevScanner ? "/dev/api/receiving/" : "/api/receiving/";
+
+  // DEV и production обслуживаются одним доменом, поэтому относительный
+  // путь вроде "api/..." может случайно уйти в production при URL "/dev".
+  return new URL(apiPrefix, currentUrl.origin);
+}
+
+const receivingApiBase = receivingApiBaseUrl();
 
 function setStatus(text, kind = "") {
   statusNode.textContent = text;
@@ -174,16 +185,31 @@ async function receivingApi(path, { method = "GET", body } = {}) {
   if (!telegram?.initData) {
     throw new Error("Откройте сканер через персональную кнопку в боте.");
   }
-  const response = await fetch(new URL(path, receivingApiBase), {
-    method,
-    cache: "no-store",
-    credentials: "omit",
-    headers: {
-      Authorization: `tma ${telegram.initData}`,
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
+  const controller = new AbortController();
+  const requestTimeout = window.setTimeout(() => controller.abort(), 60_000);
+  let response;
+  try {
+    response = await fetch(new URL(path, receivingApiBase), {
+      method,
+      cache: "no-store",
+      credentials: "omit",
+      signal: controller.signal,
+      headers: {
+        Authorization: `tma ${telegram.initData}`,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(
+        "Google Sheets не ответил вовремя. Проверьте таблицу и повторите сохранение.",
+      );
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(requestTimeout);
+  }
   let payload;
   try {
     payload = await response.json();
@@ -295,7 +321,9 @@ async function confirmCandidate() {
 }
 
 async function saveUnknown() {
+  const originalButtonText = saveDetailButton.textContent;
   saveDetailButton.disabled = true;
+  saveDetailButton.textContent = "Сохраняем…";
   setStatus("Добавляем неизвестную посылку…");
   try {
     const lookup = await receivingApi("unknown", {
@@ -311,6 +339,7 @@ async function saveUnknown() {
     setStatus(error.message, "error");
   } finally {
     saveDetailButton.disabled = false;
+    saveDetailButton.textContent = originalButtonText;
   }
 }
 

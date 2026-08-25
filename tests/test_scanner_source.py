@@ -89,5 +89,17 @@ class DeploymentRouteTests(unittest.TestCase):
         self.assertNotIn('"8080:8080"', compose)
 
 
+class SplitContentsWorkflowTests(unittest.TestCase):
+    def test_split_receiving_uses_server_side_selection_endpoint(self) -> None:
+        self.assertIn('receivingApi("complete-split"', APP_JS)
+        self.assertIn("currentLookup.split_contents", APP_JS)
+        self.assertIn("splitSelection.replacements", APP_JS)
+        self.assertIn("splitSelection.extras", APP_JS)
+
+    def test_replacement_warns_about_error_status(self) -> None:
+        self.assertIn("Итоговый статус будет «Ошибка»", APP_JS)
+        self.assertIn("splitWillBeError()", APP_JS)
+
+
 if __name__ == "__main__":
     unittest.main()

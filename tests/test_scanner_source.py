@@ -59,6 +59,19 @@ class CameraLifecycleTests(unittest.TestCase):
 
 
 class DeploymentRouteTests(unittest.TestCase):
+    def test_dev_scanner_uses_dev_api_prefix(self) -> None:
+        self.assertIn("function receivingApiBaseUrl()", APP_JS)
+        self.assertIn('currentUrl.pathname === "/dev"', APP_JS)
+        self.assertIn('currentUrl.pathname.startsWith("/dev/")', APP_JS)
+        self.assertIn('"/dev/api/receiving/"', APP_JS)
+        self.assertIn('"/api/receiving/"', APP_JS)
+        self.assertIn("const receivingApiBase = receivingApiBaseUrl();", APP_JS)
+
+    def test_receiving_request_has_timeout_and_visible_save_progress(self) -> None:
+        self.assertIn("const controller = new AbortController();", APP_JS)
+        self.assertIn("signal: controller.signal", APP_JS)
+        self.assertIn('saveDetailButton.textContent = "Сохраняем…"', APP_JS)
+
     def test_caddy_routes_dev_and_production_api_separately(self) -> None:
         caddy = (ROOT / "deploy" / "Caddyfile.dev").read_text(encoding="utf-8")
 

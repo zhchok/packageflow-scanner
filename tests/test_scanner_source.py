@@ -4,6 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JS = (ROOT / "app.js").read_text(encoding="utf-8")
+INDEX_HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 def function_body(name: str, next_name: str) -> str:
@@ -99,6 +100,14 @@ class SplitContentsWorkflowTests(unittest.TestCase):
     def test_replacement_warns_about_error_status(self) -> None:
         self.assertIn("Итоговый статус будет «Ошибка»", APP_JS)
         self.assertIn("splitWillBeError()", APP_JS)
+
+    def test_confirmation_is_above_manual_adjustment_actions(self) -> None:
+        confirmation = INDEX_HTML.index('id="split-confirm"')
+        replacement = INDEX_HTML.index('id="split-replacement"')
+        extra = INDEX_HTML.index('id="split-extra"')
+
+        self.assertLess(confirmation, replacement)
+        self.assertLess(confirmation, extra)
 
 
 if __name__ == "__main__":

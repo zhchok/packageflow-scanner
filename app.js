@@ -345,7 +345,7 @@ function renderSplitSummary() {
     if (quantity > 0) lines.push(`• ${quantity} × ${displayNames[key] || key}`);
   }
   for (const replacement of splitSelection.replacements) {
-    lines.push(`• Замена: ${replacement.expected} → ${replacement.actual}`);
+    lines.push(`• Вместо: ${replacement.expected} → ${replacement.actual}`);
   }
   for (const item of splitSelection.extras) {
     lines.push(`• Дополнительно: ${item.quantity} × ${item.name}`);

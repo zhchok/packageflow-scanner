@@ -105,6 +105,135 @@ let detailMode;
 let receiverName = "";
 let splitSelection = { selected: {}, replacements: [], extras: [] };
 let splitManualMode;
+let workflowId = 0;
+let operationId = 0;
+let activeOperation;
+
+const operationControls = [
+  startButton, torchButton, switchCameraButton, manualButton, closeButton,
+  manualValue, scanOnceButton, confirmButton, rescanButton,
+  cancelConfirmationButton, markTakenButton, markErrorButton,
+  splitReplacementButton, splitExtraButton, splitConfirmButton,
+  splitBackButton, splitManualBackButton, splitManualValue,
+  splitExpectedItem, receivingDetail, saveDetailButton, cancelDetailButton,
+  transferPackageButton, nextPackageButton, finishSessionButton,
+  cancelReceivingButton,
+];
+
+const UNCERTAIN_SAVE_MESSAGE =
+  "Не удалось подтвердить сохранение. Проверьте статус посылки перед повторной попыткой.";
+
+function activeTracking() {
+  return currentLookup?.tracking || pendingTracking || "";
+}
+
+function cloneRequestBody(body) {
+  return JSON.parse(JSON.stringify(body));
+}
+
+function contextMatches(operation) {
+  return Boolean(
+    operation &&
+      operation.workflowId === workflowId &&
+      normalizeTracking(activeTracking()) === operation.tracking &&
+      pendingEventId === operation.eventId &&
+      pendingMethod === operation.method,
+  );
+}
+
+function ownsOperation(operation) {
+  return activeOperation === operation && contextMatches(operation);
+}
+
+function blockedByOperation() {
+  if (!activeOperation) return false;
+  setStatus("Сохраняем… Дождитесь подтверждения операции.");
+  return true;
+}
+
+function beginOperation(action, body) {
+  if (activeOperation && !contextMatches(activeOperation)) {
+    activeOperation = undefined;
+  }
+  if (activeOperation) return undefined;
+  const snapshot = cloneRequestBody(body);
+  const tracking = normalizeTracking(snapshot.tracking || activeTracking());
+  const operation = {
+    id: ++operationId,
+    workflowId,
+    tracking,
+    eventId: String(snapshot.event_id || pendingEventId || ""),
+    method: String(snapshot.method || pendingMethod || ""),
+    action,
+    body: snapshot,
+    controlState: [...new Set([
+      ...operationControls,
+      ...(splitItemsNode.querySelectorAll?.("button") || []),
+    ])].map((element) => ({
+      element,
+      disabled: element.disabled,
+      readOnly: element.readOnly,
+      textContent: element.textContent,
+    })),
+  };
+  activeOperation = operation;
+  for (const { element } of operation.controlState) {
+    element.disabled = true;
+    if ("readOnly" in element) element.readOnly = true;
+  }
+  return operation;
+}
+
+function finishOperation(operation) {
+  if (activeOperation !== operation) return false;
+  const stillOwnsScreen = contextMatches(operation);
+  activeOperation = undefined;
+  if (stillOwnsScreen) {
+    for (const { element, disabled, readOnly, textContent } of operation.controlState) {
+      element.disabled = disabled;
+      if (element.textContent !== undefined) element.textContent = textContent;
+      if (readOnly !== undefined) element.readOnly = readOnly;
+    }
+  }
+  return stillOwnsScreen;
+}
+
+function beginWorkflow() {
+  if (activeOperation) finishOperation(activeOperation);
+  workflowId += 1;
+  loggingCandidate = false;
+  return workflowId;
+}
+
+function responseMatchesOperation(operation, payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  if (normalizeTracking(payload.tracking) !== operation.tracking) return false;
+  if (operation.action === "log") return payload.confirmed === true;
+  if (["lookup", "unknown", "transfer"].includes(operation.action)) {
+    return ["package", "unknown", "transfer"].includes(payload.kind);
+  }
+  return (
+    typeof payload.is_split === "boolean" &&
+    typeof payload.processed_count === "number" &&
+    typeof payload.total_count === "number" &&
+    typeof payload.finalized === "boolean" &&
+    typeof payload.final_status === "string"
+  );
+}
+
+function displaySaveError(error) {
+  if (
+    Number.isInteger(error?.httpStatus) &&
+    error.httpStatus >= 400 &&
+    error.httpStatus < 500
+  ) {
+    setStatus(error.message, "error");
+  } else {
+    setStatus(UNCERTAIN_SAVE_MESSAGE, "error");
+  }
+}
 
 function receivingApiBaseUrl() {
   const currentUrl = new URL(window.location.href);
@@ -167,7 +296,7 @@ function stopCamera() {
 }
 
 async function presentCandidate(value, source = "barcode") {
-  if (completed || pendingTracking) return false;
+  if (activeOperation || completed || pendingTracking) return false;
   const tracking = normalizeTracking(value);
   if (!isTracking(tracking)) {
     setStatus(
@@ -177,6 +306,7 @@ async function presentCandidate(value, source = "barcode") {
     return false;
   }
 
+  const candidateWorkflowId = beginWorkflow();
   pendingTracking = tracking;
   pendingEventId = crypto.randomUUID();
   pendingMethod = source === "text" ? "OCR" : source === "manual" ? "Вручную" : "Barcode";
@@ -197,11 +327,13 @@ async function presentCandidate(value, source = "barcode") {
   rescanButton.disabled = true;
   setStatus("Сохраняем ввод трека в журнале…");
   navigator.vibrate?.(100);
-  telegram?.HapticFeedback?.notificationOccurred("success");
+  telegram?.HapticFeedback?.impactOccurred("light");
   try {
-    await logCandidate();
+    const logged = await logCandidate();
+    if (!logged || workflowId !== candidateWorkflowId) return true;
     setStatus("Трек записан в журнал. Проверьте номер.", "success");
   } catch (error) {
+    if (workflowId !== candidateWorkflowId) return true;
     console.error(error);
     setStatus("Не удалось подтвердить запись трека в журнале. Повторите попытку.", "error");
   }
@@ -209,28 +341,46 @@ async function presentCandidate(value, source = "barcode") {
 }
 
 async function logCandidate() {
-  if (candidateLogged) return;
+  if (candidateLogged) return true;
+  if (activeOperation || !pendingTracking || !pendingEventId) return false;
+  const body = {
+    tracking: pendingTracking,
+    method: pendingMethod,
+    event_id: pendingEventId,
+  };
+  const operation = beginOperation("log", body);
+  if (!operation) return false;
   loggingCandidate = true;
-  confirmButton.disabled = true;
-  rescanButton.disabled = true;
-  cancelConfirmationButton.disabled = true;
+  confirmButton.textContent = "Сохраняем…";
+  setStatus("Сохраняем ввод трека в журнале…");
+  let confirmationResult;
+  let operationError;
   try {
-    const confirmation = await receivingApi("log", {
-      method: "POST",
-      body: { tracking: pendingTracking, method: pendingMethod, event_id: pendingEventId },
+    confirmationResult = await receivingApi("log", {
+      method: "POST", body: operation.body,
     });
-    if (confirmation?.confirmed !== true || confirmation.tracking !== pendingTracking) {
-      throw new Error("Журнал не подтвердил трек.");
+    if (!responseMatchesOperation(operation, confirmationResult)) {
+      throw new Error("Журнал вернул некорректное подтверждение.");
     }
-    candidateLogged = true;
   } catch (error) {
-    throw new Error("Не удалось подтвердить запись трека в журнале. Повторите попытку.", { cause: error });
+    operationError = error;
   } finally {
-    loggingCandidate = false;
-    confirmButton.disabled = false;
-    rescanButton.disabled = false;
-    cancelConfirmationButton.disabled = false;
+    finishOperation(operation);
   }
+  if (workflowId !== operation.workflowId) return false;
+  loggingCandidate = false;
+  confirmButton.disabled = false;
+  rescanButton.disabled = false;
+  cancelConfirmationButton.disabled = false;
+  if (operationError) {
+    throw new Error(
+      "Не удалось подтвердить запись трека в журнале. Повторите попытку.",
+      { cause: operationError },
+    );
+  }
+  candidateLogged = true;
+  confirmButton.textContent = "Проверить посылку";
+  return true;
 }
 
 async function receivingApi(path, { method = "GET", body } = {}) {
@@ -254,9 +404,7 @@ async function receivingApi(path, { method = "GET", body } = {}) {
     });
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error(
-        "Google Sheets не ответил вовремя. Проверьте таблицу и повторите сохранение.",
-      );
+      throw new Error("Сервер не ответил вовремя. Результат операции не подтверждён.");
     }
     throw error;
   } finally {
@@ -269,9 +417,11 @@ async function receivingApi(path, { method = "GET", body } = {}) {
     console.debug("Receiving API returned a non-JSON response", error);
   }
   if (!response.ok) {
-    throw new Error(
+    const error = new Error(
       payload?.error || "Сервис приёма временно недоступен. Попробуйте ещё раз.",
     );
+    error.httpStatus = response.status;
+    throw error;
   }
   return payload;
 }
@@ -436,6 +586,7 @@ function renderSplitSelector() {
     subtract.textContent = "−";
     subtract.disabled = selected === 0;
     subtract.addEventListener("click", () => {
+      if (blockedByOperation()) return;
       splitSelection.selected[key] = Math.max(
         0,
         (splitSelection.selected[key] || 0) - 1,
@@ -457,6 +608,7 @@ function renderSplitSelector() {
     add.textContent = "+";
     add.disabled = selected >= maximum;
     add.addEventListener("click", () => {
+      if (blockedByOperation()) return;
       splitSelection.selected[key] = Math.min(
         maximum,
         (splitSelection.selected[key] || 0) + 1,
@@ -471,6 +623,7 @@ function renderSplitSelector() {
 }
 
 function showSplitSelector({ reset = false } = {}) {
+  if (blockedByOperation()) return false;
   if (reset) resetSplitSelection();
   receivingDecisions.hidden = true;
   receivingDetailForm.hidden = true;
@@ -478,9 +631,11 @@ function showSplitSelector({ reset = false } = {}) {
   splitContentsPanel.hidden = false;
   renderSplitSelector();
   setStatus("Отметьте содержимое текущей коробки.");
+  return true;
 }
 
 function showSplitManualForm(mode) {
+  if (blockedByOperation()) return false;
   splitManualMode = mode;
   splitContentsPanel.hidden = true;
   splitManualForm.hidden = false;
@@ -502,9 +657,11 @@ function showSplitManualForm(mode) {
     splitExpectedItem.hidden = true;
   }
   splitManualValue.focus();
+  return true;
 }
 
 function showDetailForm(mode) {
+  if (blockedByOperation()) return false;
   detailMode = mode;
   receivingDecisions.hidden = true;
   transferActions.hidden = true;
@@ -516,9 +673,11 @@ function showDetailForm(mode) {
         ? "Введите содержимое этой части split-посылки:"
         : "Опишите ошибку одним сообщением:";
   receivingDetail.focus();
+  return true;
 }
 
 function showLookup(lookup) {
+  beginWorkflow();
   currentLookup = lookup;
   resetWorkflowControls();
   resetSplitSelection();
@@ -570,50 +729,99 @@ function showLookup(lookup) {
 }
 
 async function confirmCandidate() {
-  if (completed || !pendingTracking) return;
+  if (blockedByOperation() || completed || !pendingTracking) return;
+  const candidate = {
+    workflowId,
+    tracking: pendingTracking,
+    eventId: pendingEventId,
+    method: pendingMethod,
+  };
   completed = true;
   confirmButton.disabled = true;
   rescanButton.disabled = true;
-  setStatus(`Проверяем посылку ${pendingTracking}…`);
+  setStatus(`Проверяем посылку ${candidate.tracking}…`);
+  let lookup;
+  let operationError;
   try {
-    await logCandidate();
-    const lookup = await receivingApi("lookup", {
-      method: "POST",
-      body: { tracking: pendingTracking, method: pendingMethod, event_id: pendingEventId },
+    const logged = await logCandidate();
+    if (
+      !logged ||
+      workflowId !== candidate.workflowId ||
+      pendingTracking !== candidate.tracking ||
+      pendingEventId !== candidate.eventId
+    ) return;
+    const operation = beginOperation("lookup", {
+      tracking: candidate.tracking,
+      method: candidate.method,
+      event_id: candidate.eventId,
     });
-    showLookup(lookup);
+    if (!operation) return;
+    confirmButton.textContent = "Проверяем…";
+    setStatus(`Проверяем посылку ${operation.tracking}…`);
+    try {
+      lookup = await receivingApi("lookup", {
+        method: "POST", body: operation.body,
+      });
+      if (!responseMatchesOperation(operation, lookup)) {
+        throw new Error("Сервис вернул некорректный результат поиска.");
+      }
+    } catch (error) {
+      operationError = error;
+    } finally {
+      finishOperation(operation);
+    }
   } catch (error) {
-    console.error(error);
+    operationError = error;
+  }
+  if (
+    workflowId !== candidate.workflowId ||
+    pendingTracking !== candidate.tracking ||
+    pendingEventId !== candidate.eventId ||
+    pendingMethod !== candidate.method
+  ) return;
+  if (operationError) {
+    console.error(operationError);
     completed = false;
     confirmButton.disabled = false;
     rescanButton.disabled = false;
-    setStatus(error.message, "error");
+    setStatus(operationError.message, "error");
+    return;
   }
+  showLookup(lookup);
 }
 
 async function saveUnknown() {
-  const originalButtonText = saveDetailButton.textContent;
-  saveDetailButton.disabled = true;
+  if (blockedByOperation() || currentLookup?.kind !== "unknown") return;
+  const operation = beginOperation("unknown", {
+    tracking: currentLookup.tracking,
+    method: pendingMethod,
+    event_id: pendingEventId,
+    contents: receivingDetail.value,
+  });
+  if (!operation) return;
   saveDetailButton.textContent = "Сохраняем…";
   setStatus("Добавляем неизвестную посылку…");
+  let lookup;
+  let operationError;
   try {
-    const lookup = await receivingApi("unknown", {
-      method: "POST",
-      body: {
-        tracking: currentLookup.tracking,
-        method: pendingMethod,
-        event_id: pendingEventId,
-        contents: receivingDetail.value,
-      },
+    lookup = await receivingApi("unknown", {
+      method: "POST", body: operation.body,
     });
-    showLookup(lookup);
+    if (!responseMatchesOperation(operation, lookup)) {
+      throw new Error("Сервис вернул некорректный результат создания посылки.");
+    }
   } catch (error) {
-    console.error(error);
-    setStatus(error.message, "error");
+    operationError = error;
   } finally {
-    saveDetailButton.disabled = false;
-    saveDetailButton.textContent = originalButtonText;
+    finishOperation(operation);
   }
+  if (!contextMatches(operation)) return;
+  if (operationError) {
+    console.error(operationError);
+    displaySaveError(operationError);
+    return;
+  }
+  showLookup(lookup);
 }
 
 function completionMessage(result) {
@@ -628,42 +836,57 @@ function completionMessage(result) {
 }
 
 async function completePackage(result, detail = "") {
+  if (blockedByOperation() || !currentLookup?.tracking) return;
   const attemptedDetailMode = detailMode;
+  const operation = beginOperation(result, {
+    tracking: currentLookup.tracking,
+    method: pendingMethod,
+    event_id: pendingEventId,
+    result,
+    detail,
+  });
+  if (!operation) return;
+  if (result === "taken") markTakenButton.textContent = "Сохраняем…";
+  else saveDetailButton.textContent = "Сохраняем…";
   receivingDecisions.hidden = true;
   receivingDetailForm.hidden = true;
   setStatus("Сохраняем результат в Google Sheets…");
+  let completion;
+  let operationError;
   try {
-    const completion = await receivingApi("complete", {
-      method: "POST",
-      body: {
-        tracking: currentLookup.tracking,
-        method: pendingMethod,
-        event_id: pendingEventId,
-        result,
-        detail,
-      },
+    completion = await receivingApi("complete", {
+      method: "POST", body: operation.body,
     });
-    receivingLabel.textContent = "Приём сохранён";
-    receivingDetails.textContent = completionMessage(completion);
-    completedActions.hidden = false;
-    cancelReceivingButton.hidden = true;
-    setStatus("Можно сканировать следующую посылку.", "success");
-    navigator.vibrate?.([80, 40, 80]);
-    telegram?.HapticFeedback?.notificationOccurred("success");
+    if (!responseMatchesOperation(operation, completion)) {
+      throw new Error("Сервис вернул некорректное подтверждение приёма.");
+    }
   } catch (error) {
-    console.error(error);
+    operationError = error;
+  } finally {
+    finishOperation(operation);
+  }
+  if (!contextMatches(operation)) return;
+  if (operationError) {
+    console.error(operationError);
     if (attemptedDetailMode === "taken" || attemptedDetailMode === "error") {
       showDetailForm(attemptedDetailMode);
     } else {
       receivingDecisions.hidden = false;
     }
-    setStatus(error.message, "error");
+    displaySaveError(operationError);
+    return;
   }
+  receivingLabel.textContent = "Приём сохранён";
+  receivingDetails.textContent = completionMessage(completion);
+  completedActions.hidden = false;
+  cancelReceivingButton.hidden = true;
+  setStatus("Можно сканировать следующую посылку.", "success");
+  navigator.vibrate?.([80, 40, 80]);
+  telegram?.HapticFeedback?.notificationOccurred("success");
 }
 
 async function completeSplitPackage() {
-  splitConfirmButton.disabled = true;
-  setStatus("Сохраняем содержимое в Google Sheets…");
+  if (blockedByOperation() || !currentLookup?.is_split) return;
   const selected = Object.fromEntries(
     splitRemainingItems()
       .map((item) => [
@@ -672,57 +895,93 @@ async function completeSplitPackage() {
       ])
       .filter(([, quantity]) => quantity > 0),
   );
+  const operation = beginOperation("complete-split", {
+    tracking: currentLookup.tracking,
+    method: pendingMethod,
+    event_id: pendingEventId,
+    selected,
+    replacements: splitSelection.replacements,
+    extras: splitSelection.extras,
+  });
+  if (!operation) return;
+  splitConfirmButton.textContent = "Сохраняем…";
+  setStatus("Сохраняем содержимое в Google Sheets…");
+  let completion;
+  let operationError;
   try {
-    const completion = await receivingApi("complete-split", {
-      method: "POST",
-      body: {
-        tracking: currentLookup.tracking,
-        method: pendingMethod,
-        event_id: pendingEventId,
-        selected,
-        replacements: splitSelection.replacements,
-        extras: splitSelection.extras,
-      },
+    completion = await receivingApi("complete-split", {
+      method: "POST", body: operation.body,
     });
-    splitContentsPanel.hidden = true;
-    receivingLabel.textContent = "Приём сохранён";
-    receivingDetails.textContent = completionMessage(completion);
-    completedActions.hidden = false;
-    cancelReceivingButton.hidden = true;
-    setStatus("Можно сканировать следующую посылку.", "success");
-    navigator.vibrate?.([80, 40, 80]);
-    telegram?.HapticFeedback?.notificationOccurred("success");
+    if (!responseMatchesOperation(operation, completion)) {
+      throw new Error("Сервис вернул некорректное подтверждение содержимого.");
+    }
   } catch (error) {
-    console.error(error);
-    splitConfirmButton.disabled = false;
-    showSplitSelector();
-    setStatus(error.message, "error");
+    operationError = error;
+  } finally {
+    finishOperation(operation);
   }
+  if (!contextMatches(operation)) return;
+  if (operationError) {
+    console.error(operationError);
+    showSplitSelector();
+    displaySaveError(operationError);
+    return;
+  }
+  splitContentsPanel.hidden = true;
+  receivingLabel.textContent =
+    completion.is_split && !completion.finalized
+      ? "Часть приёма сохранена"
+      : "Приём сохранён";
+  receivingDetails.textContent = completionMessage(completion);
+  completedActions.hidden = false;
+  cancelReceivingButton.hidden = true;
+  setStatus("Можно сканировать следующую посылку.", "success");
+  navigator.vibrate?.([80, 40, 80]);
+  telegram?.HapticFeedback?.notificationOccurred("success");
 }
 
 async function transferPackage() {
-  transferPackageButton.disabled = true;
+  if (blockedByOperation() || currentLookup?.kind !== "transfer") return;
+  const operation = beginOperation("transfer", {
+    tracking: currentLookup.tracking,
+    method: pendingMethod,
+    event_id: pendingEventId,
+  });
+  if (!operation) return;
+  transferPackageButton.textContent = "Переносим…";
   setStatus("Переносим посылку в вашу таблицу…");
+  let lookup;
+  let operationError;
   try {
-    const lookup = await receivingApi("transfer", {
-      method: "POST",
-      body: { tracking: currentLookup.tracking, method: pendingMethod, event_id: pendingEventId },
+    lookup = await receivingApi("transfer", {
+      method: "POST", body: operation.body,
     });
-    showLookup(lookup);
+    if (!responseMatchesOperation(operation, lookup)) {
+      throw new Error("Сервис вернул некорректный результат переноса.");
+    }
   } catch (error) {
-    console.error(error);
-    setStatus(error.message, "error");
+    operationError = error;
   } finally {
-    transferPackageButton.disabled = false;
+    finishOperation(operation);
   }
+  if (!contextMatches(operation)) return;
+  if (operationError) {
+    console.error(operationError);
+    displaySaveError(operationError);
+    return;
+  }
+  showLookup(lookup);
 }
 
 function nextPackage() {
+  if (blockedByOperation()) return false;
+  beginWorkflow();
   currentLookup = undefined;
   pendingTracking = undefined;
   pendingEventId = undefined;
   pendingMethod = undefined;
   candidateLogged = false;
+  loggingCandidate = false;
   completed = false;
   candidateNode.textContent = "";
   receivingPanel.hidden = true;
@@ -733,11 +992,14 @@ function nextPackage() {
   confirmButton.disabled = false;
   rescanButton.disabled = false;
   void resumeScanner();
+  return true;
 }
 
 function finishReceivingSession() {
+  if (blockedByOperation()) return false;
   stopCamera();
   telegram?.close();
+  return true;
 }
 
 function hasLiveCamera() {
@@ -747,12 +1009,14 @@ function hasLiveCamera() {
 }
 
 async function resumeScanner() {
+  const currentWorkflowId = workflowId;
   if (!hasLiveCamera()) {
     await startScanner(activeVideoDeviceId);
     return;
   }
 
   await video.play();
+  if (workflowId !== currentWorkflowId || activeOperation) return;
   const track = stream.getVideoTracks()[0];
   scanning = true;
   scanOnceButton.disabled = false;
@@ -762,7 +1026,8 @@ async function resumeScanner() {
 }
 
 function rescan() {
-  if (loggingCandidate) return;
+  if (blockedByOperation() || loggingCandidate) return false;
+  beginWorkflow();
   pendingTracking = undefined;
   pendingEventId = undefined;
   pendingMethod = undefined;
@@ -776,6 +1041,7 @@ function rescan() {
   confirmButton.disabled = false;
   rescanButton.disabled = false;
   void resumeScanner();
+  return true;
 }
 
 function loadZxing() {
@@ -1276,7 +1542,8 @@ async function refocusCamera() {
 }
 
 async function scanOnce() {
-  if (!scanning || processing || completed) return;
+  if (activeOperation || !scanning || processing || completed) return;
+  const scanWorkflowId = workflowId;
   processing = true;
   scanOnceButton.disabled = true;
   cameraFrame.classList.add("is-processing");
@@ -1315,13 +1582,16 @@ async function scanOnce() {
     );
   } finally {
     processing = false;
-    cameraFrame.classList.remove("is-processing");
-    scanOnceButton.disabled = !scanning;
+    if (workflowId === scanWorkflowId && !activeOperation) {
+      cameraFrame.classList.remove("is-processing");
+      scanOnceButton.disabled = !scanning;
+    }
   }
 }
 
 async function scanWhileHeld(session) {
-  if (!scanning || processing || completed) return;
+  if (activeOperation || !scanning || processing || completed) return;
+  const scanWorkflowId = workflowId;
   processing = true;
   cameraFrame.classList.add("is-processing");
   const startedAt = performance.now();
@@ -1374,13 +1644,15 @@ async function scanWhileHeld(session) {
     }
   } finally {
     processing = false;
-    cameraFrame.classList.remove("is-processing");
-    scanOnceButton.disabled = !scanning;
+    if (workflowId === scanWorkflowId && !activeOperation) {
+      cameraFrame.classList.remove("is-processing");
+      scanOnceButton.disabled = !scanning;
+    }
   }
 }
 
 function beginScanPress(event) {
-  if (!scanning || processing || completed || event.button > 0) return;
+  if (activeOperation || !scanning || processing || completed || event.button > 0) return;
   event.preventDefault();
   pressedPointerId = event.pointerId;
   longPressTriggered = false;
@@ -1418,7 +1690,10 @@ function finishScanPress(event, cancelled = false) {
 }
 
 async function startScanner(deviceId) {
+  if (activeOperation) return false;
   if (scanning || completed) return;
+  const startupWorkflowId = workflowId;
+  let openedStream;
   startButton.hidden = true;
   setStatus("Запрашиваем доступ к камере…");
 
@@ -1443,17 +1718,46 @@ async function startScanner(deviceId) {
       videoConstraints.facingMode = { ideal: "environment" };
     }
 
-    stream = await navigator.mediaDevices.getUserMedia({
+    openedStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: videoConstraints,
     });
+    if (workflowId !== startupWorkflowId || activeOperation) {
+      openedStream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+    stream = openedStream;
     video.srcObject = stream;
     await video.play();
+    if (workflowId !== startupWorkflowId || activeOperation) {
+      openedStream.getTracks().forEach((track) => track.stop());
+      if (stream === openedStream) {
+        stream = undefined;
+        video.srcObject = null;
+      }
+      return false;
+    }
 
     const track = stream.getVideoTracks()[0];
     const capabilities = track.getCapabilities?.() || {};
     await optimizeCameraTrack(track);
+    if (workflowId !== startupWorkflowId || activeOperation) {
+      openedStream.getTracks().forEach((cameraTrack) => cameraTrack.stop());
+      if (stream === openedStream) {
+        stream = undefined;
+        video.srcObject = null;
+      }
+      return false;
+    }
     const preferredDevice = await refreshVideoDevices(track);
+    if (workflowId !== startupWorkflowId || activeOperation) {
+      openedStream.getTracks().forEach((cameraTrack) => cameraTrack.stop());
+      if (stream === openedStream) {
+        stream = undefined;
+        video.srcObject = null;
+      }
+      return false;
+    }
     // Запоминаем основную камеру для следующего открытия, но не вызываем
     // getUserMedia второй раз: Telegram показывает на такой вызов новый диалог.
     storePreferredCameraId(
@@ -1463,6 +1767,14 @@ async function startScanner(deviceId) {
 
     if ("BarcodeDetector" in window) {
       const available = await BarcodeDetector.getSupportedFormats();
+      if (workflowId !== startupWorkflowId || activeOperation) {
+        openedStream.getTracks().forEach((cameraTrack) => cameraTrack.stop());
+        if (stream === openedStream) {
+          stream = undefined;
+          video.srcObject = null;
+        }
+        return false;
+      }
       const formats = supportedFormats.filter((format) =>
         available.includes(format),
       );
@@ -1475,6 +1787,10 @@ async function startScanner(deviceId) {
       `Камера: ${cameraDiagnostics(track)}. Держите этикетку в 20–30 см и нажмите «Сканировать».`,
     );
   } catch (error) {
+    if (openedStream && stream !== openedStream) {
+      openedStream.getTracks().forEach((track) => track.stop());
+    }
+    if (workflowId !== startupWorkflowId || activeOperation) return false;
     console.error(error);
     stopCamera();
     startButton.hidden = false;
@@ -1486,7 +1802,7 @@ async function startScanner(deviceId) {
 }
 
 switchCameraButton.addEventListener("click", async () => {
-  if (availableVideoDevices.length < 2 || processing || completed) return;
+  if (activeOperation || availableVideoDevices.length < 2 || processing || completed) return;
   const currentIndex = availableVideoDevices.findIndex(
     (device) => device.deviceId === activeVideoDeviceId,
   );
@@ -1498,9 +1814,11 @@ switchCameraButton.addEventListener("click", async () => {
 });
 
 cameraFrame.addEventListener("click", async () => {
-  if (!scanning || processing || completed) return;
+  if (activeOperation || !scanning || processing || completed) return;
+  const focusWorkflowId = workflowId;
   setStatus("Фокусируем камеру по центру рамки…");
   const focused = await refocusCamera();
+  if (workflowId !== focusWorkflowId || activeOperation) return;
   setStatus(
     focused
       ? "Фокус готов. Нажмите «Сканировать»."
@@ -1509,6 +1827,7 @@ cameraFrame.addEventListener("click", async () => {
 });
 
 torchButton.addEventListener("click", async () => {
+  if (blockedByOperation()) return;
   const track = stream?.getVideoTracks()[0];
   if (!track) return;
   torchEnabled = !torchEnabled;
@@ -1540,11 +1859,13 @@ scanOnceButton.addEventListener("keydown", (event) => {
   }
 });
 manualButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
   manualForm.hidden = !manualForm.hidden;
   if (!manualForm.hidden) manualValue.focus();
 });
 manualForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (blockedByOperation()) return;
   await presentCandidate(manualValue.value, "manual");
 });
 confirmButton.addEventListener("click", () => void confirmCandidate());
@@ -1553,6 +1874,7 @@ cancelConfirmationButton.addEventListener("click", () => {
   rescan();
 });
 markTakenButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
   if (currentLookup?.is_split) {
     if (!currentLookup.split_contents) {
       setStatus(
@@ -1566,17 +1888,25 @@ markTakenButton.addEventListener("click", () => {
   }
   void completePackage("taken");
 });
-markErrorButton.addEventListener("click", () => showDetailForm("error"));
+markErrorButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
+  showDetailForm("error");
+});
 splitReplacementButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
   if (!availableReplacementItems().length) {
     setStatus("Нет ожидаемых товаров для замены.", "error");
     return;
   }
   showSplitManualForm("replacement");
 });
-splitExtraButton.addEventListener("click", () => showSplitManualForm("extra"));
+splitExtraButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
+  showSplitManualForm("extra");
+});
 splitConfirmButton.addEventListener("click", () => void completeSplitPackage());
 splitBackButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
   splitContentsPanel.hidden = true;
   receivingDecisions.hidden = false;
   setStatus("Выберите результат приёма.");
@@ -1584,6 +1914,7 @@ splitBackButton.addEventListener("click", () => {
 splitManualBackButton.addEventListener("click", () => showSplitSelector());
 splitManualForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (blockedByOperation()) return;
   const rawValue = splitManualValue.value.trim().replace(/\s+/g, " ");
   if (!rawValue) {
     setStatus("Введите фактически полученный товар.", "error");
@@ -1614,6 +1945,7 @@ splitManualForm.addEventListener("submit", (event) => {
 });
 receivingDetailForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (blockedByOperation()) return;
   if (detailMode === "unknown") {
     void saveUnknown();
     return;
@@ -1621,6 +1953,7 @@ receivingDetailForm.addEventListener("submit", (event) => {
   void completePackage(detailMode, receivingDetail.value);
 });
 cancelDetailButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
   if (currentLookup?.kind === "unknown") {
     nextPackage();
     return;
@@ -1634,6 +1967,7 @@ nextPackageButton.addEventListener("click", nextPackage);
 finishSessionButton.addEventListener("click", finishReceivingSession);
 cancelReceivingButton.addEventListener("click", nextPackage);
 closeButton.addEventListener("click", () => {
+  if (blockedByOperation()) return;
   stopCamera();
   telegram?.close();
 });

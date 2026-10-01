@@ -90,6 +90,10 @@ let scanning = false;
 let processing = false;
 let completed = false;
 let pendingTracking;
+let pendingEventId;
+let pendingMethod;
+let candidateLogged = false;
+let loggingCandidate = false;
 let torchEnabled = false;
 let holdTimer;
 let holdActive = false;
@@ -162,7 +166,7 @@ function stopCamera() {
   nativeSupportedFormats = [];
 }
 
-function presentCandidate(value, source = "barcode") {
+async function presentCandidate(value, source = "barcode") {
   if (completed || pendingTracking) return false;
   const tracking = normalizeTracking(value);
   if (!isTracking(tracking)) {
@@ -174,6 +178,9 @@ function presentCandidate(value, source = "barcode") {
   }
 
   pendingTracking = tracking;
+  pendingEventId = crypto.randomUUID();
+  pendingMethod = source === "text" ? "OCR" : source === "manual" ? "Вручную" : "Barcode";
+  candidateLogged = false;
   // Поток остаётся живым на экране подтверждения, потому что Telegram
   // показывает системный запрос при каждом новом getUserMedia в одной сессии.
   pauseScanning();
@@ -182,18 +189,48 @@ function presentCandidate(value, source = "barcode") {
   actions.hidden = true;
   manualForm.hidden = true;
   confirmationTitle.textContent =
-    source === "text" ? "Трек-номер найден в тексте" : "Распознан трек-номер";
+    source === "text" ? "Трек-номер найден в тексте"
+      : source === "manual" ? "Введён трек-номер" : "Распознан трек-номер";
   candidateNode.textContent = tracking;
   confirmation.hidden = false;
-  setStatus(
-    source === "text"
-      ? "Текст распознан. Проверьте найденный номер."
-      : "Проверьте распознанный номер.",
-    "success",
-  );
+  confirmButton.disabled = true;
+  rescanButton.disabled = true;
+  setStatus("Сохраняем ввод трека в журнале…");
   navigator.vibrate?.(100);
   telegram?.HapticFeedback?.notificationOccurred("success");
+  try {
+    await logCandidate();
+    setStatus("Трек записан в журнал. Проверьте номер.", "success");
+  } catch (error) {
+    console.error(error);
+    setStatus("Не удалось подтвердить запись трека в журнале. Повторите попытку.", "error");
+  }
   return true;
+}
+
+async function logCandidate() {
+  if (candidateLogged) return;
+  loggingCandidate = true;
+  confirmButton.disabled = true;
+  rescanButton.disabled = true;
+  cancelConfirmationButton.disabled = true;
+  try {
+    const confirmation = await receivingApi("log", {
+      method: "POST",
+      body: { tracking: pendingTracking, method: pendingMethod, event_id: pendingEventId },
+    });
+    if (confirmation?.confirmed !== true || confirmation.tracking !== pendingTracking) {
+      throw new Error("Журнал не подтвердил трек.");
+    }
+    candidateLogged = true;
+  } catch (error) {
+    throw new Error("Не удалось подтвердить запись трека в журнале. Повторите попытку.", { cause: error });
+  } finally {
+    loggingCandidate = false;
+    confirmButton.disabled = false;
+    rescanButton.disabled = false;
+    cancelConfirmationButton.disabled = false;
+  }
 }
 
 async function receivingApi(path, { method = "GET", body } = {}) {
@@ -539,9 +576,10 @@ async function confirmCandidate() {
   rescanButton.disabled = true;
   setStatus(`Проверяем посылку ${pendingTracking}…`);
   try {
+    await logCandidate();
     const lookup = await receivingApi("lookup", {
       method: "POST",
-      body: { tracking: pendingTracking },
+      body: { tracking: pendingTracking, method: pendingMethod, event_id: pendingEventId },
     });
     showLookup(lookup);
   } catch (error) {
@@ -563,6 +601,8 @@ async function saveUnknown() {
       method: "POST",
       body: {
         tracking: currentLookup.tracking,
+        method: pendingMethod,
+        event_id: pendingEventId,
         contents: receivingDetail.value,
       },
     });
@@ -597,6 +637,8 @@ async function completePackage(result, detail = "") {
       method: "POST",
       body: {
         tracking: currentLookup.tracking,
+        method: pendingMethod,
+        event_id: pendingEventId,
         result,
         detail,
       },
@@ -635,6 +677,8 @@ async function completeSplitPackage() {
       method: "POST",
       body: {
         tracking: currentLookup.tracking,
+        method: pendingMethod,
+        event_id: pendingEventId,
         selected,
         replacements: splitSelection.replacements,
         extras: splitSelection.extras,
@@ -662,7 +706,7 @@ async function transferPackage() {
   try {
     const lookup = await receivingApi("transfer", {
       method: "POST",
-      body: { tracking: currentLookup.tracking },
+      body: { tracking: currentLookup.tracking, method: pendingMethod, event_id: pendingEventId },
     });
     showLookup(lookup);
   } catch (error) {
@@ -676,6 +720,9 @@ async function transferPackage() {
 function nextPackage() {
   currentLookup = undefined;
   pendingTracking = undefined;
+  pendingEventId = undefined;
+  pendingMethod = undefined;
+  candidateLogged = false;
   completed = false;
   candidateNode.textContent = "";
   receivingPanel.hidden = true;
@@ -715,7 +762,11 @@ async function resumeScanner() {
 }
 
 function rescan() {
+  if (loggingCandidate) return;
   pendingTracking = undefined;
+  pendingEventId = undefined;
+  pendingMethod = undefined;
+  candidateLogged = false;
   completed = false;
   candidateNode.textContent = "";
   confirmation.hidden = true;
@@ -1239,7 +1290,7 @@ async function scanOnce() {
       if (attempt > 0) await wait(140);
       tracking = await detectBarcodeFromCurrentFrame();
       if (tracking) {
-        presentCandidate(tracking);
+        await presentCandidate(tracking);
         return;
       }
     }
@@ -1248,7 +1299,7 @@ async function scanOnce() {
     const textImage = captureScanRegion();
     tracking = await recognizeTrackingText(textImage);
     if (tracking) {
-      presentCandidate(tracking, "text");
+      await presentCandidate(tracking, "text");
       return;
     }
 
@@ -1288,7 +1339,7 @@ async function scanWhileHeld(session) {
       const tracking = await detectBarcodeFromCurrentFrame();
       if (!holdActive || session !== holdSession) return;
       if (tracking) {
-        presentCandidate(tracking);
+        await presentCandidate(tracking);
         return;
       }
 
@@ -1306,7 +1357,7 @@ async function scanWhileHeld(session) {
         );
         if (!holdActive || session !== holdSession) return;
         if (textTracking) {
-          presentCandidate(textTracking, "text");
+          await presentCandidate(textTracking, "text");
           return;
         }
       }
@@ -1492,9 +1543,9 @@ manualButton.addEventListener("click", () => {
   manualForm.hidden = !manualForm.hidden;
   if (!manualForm.hidden) manualValue.focus();
 });
-manualForm.addEventListener("submit", (event) => {
+manualForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  presentCandidate(manualValue.value);
+  await presentCandidate(manualValue.value, "manual");
 });
 confirmButton.addEventListener("click", () => void confirmCandidate());
 rescanButton.addEventListener("click", rescan);

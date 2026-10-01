@@ -7,6 +7,7 @@ Static Telegram Mini App for button-triggered 1D/2D barcode and tracking-text sc
 - Falls back to local OCR when a barcode or QR code cannot be decoded.
 - Uses a same-origin PackageFlow API to find and receive a package without
   closing the Mini App between scans.
+- Confirms a tracking input in the backend `TrackingLog` before package lookup.
 - Does not upload, store, or transmit camera frames.
 - Uses the native `BarcodeDetector` API when available and ZXing as a compatibility fallback.
 
@@ -29,3 +30,9 @@ camera frames never leave the device.
 Changes are prepared and checked in `develop`; GitHub Pages serves only the
 reviewed `main` branch. GitHub Actions verifies CSP hardening, version and SRI
 pinning, forbidden browser APIs, and accidental embedded credentials.
+
+The scanner creates a new event ID when it presents a barcode or OCR result,
+or when manual entry is submitted. A retry keeps that ID. The backend must
+provide `/api/receiving/log` and require the same confirmed ID on lookup and
+subsequent receiving requests. Update the backend first, then publish the
+matching scanner release during the same maintenance window.
